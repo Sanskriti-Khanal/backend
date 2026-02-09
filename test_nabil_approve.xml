@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Message date="2025-12-28T12:00:00">
+  <Version>1.0</Version>
+  <OrderID>TEST_ORDER_12345</OrderID>
+  <OrderIDEncrypted>ENCRYPTED_ORDER_ID_12345</OrderIDEncrypted>
+  <SessionId>TEST_SESSION_12345</SessionId>
+  <OrderStatus>APPROVED</OrderStatus>
+  <OrderStatusScr>Approved</OrderStatusScr>
+  <PurchaseAmount>10000</PurchaseAmount>
+  <TotalAmount>10000</TotalAmount>
+  <Currency>524</Currency>
+  <CurrencyISOAlpha>NPR</CurrencyISOAlpha>
+  <TranDateTime>2025-12-28T12:00:00</TranDateTime>
+  <OrderDescription>Test Payment Order</OrderDescription>
+  <TransactionType>Purchase</TransactionType>
+  <Language>EN</Language>
+  <BankName>PSP NABIL</BankName>
+</Message>
+
+
+
+

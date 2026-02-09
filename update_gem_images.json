@@ -1,0 +1,65 @@
+{
+  "gem_images": {
+    "amber": "https://gemsmantra.com/cdn/shop/collections/Amber.png?v=1741775478&width=600",
+    "apatite": "https://gemsmantra.com/cdn/shop/collections/Apatite.jpg?v=1741775560&width=600",
+    "aventurine": "https://gemsmantra.com/cdn/shop/collections/Aventurine.jpg?v=1741775644&width=600",
+    "azurite": "https://gemsmantra.com/cdn/shop/collections/Azurite.jpg?v=1741775687&width=600",
+    "tourmaline": "YOUR_GOOGLE_IMAGE_URL_HERE",
+    "bloodstone": "https://gemsmantra.com/cdn/shop/collections/Bloodstone.jpg?v=1741775782&width=600",
+    "ruby": "https://gemsmantra.com/cdn/shop/collections/Ruby_8427c1d7-1fae-4965-8c8a-3f3499fa15a3.jpg?v=1741775066&width=600",
+    "carnelian": "https://gemsmantra.com/cdn/shop/collections/Carnelian.jpg?v=1741775950&width=600",
+    "quartz": "YOUR_GOOGLE_IMAGE_URL_HERE",
+    "howlite": "https://gemsmantra.com/cdn/shop/collections/Howlite.jpg?v=1741776420&width=600",
+    "amethyst": "https://gemsmantra.com/cdn/shop/collections/Amethyst_-_Gemsmantra-4015495.jpg?v=1741775516&width=600",
+    "aquamarine": "https://gemsmantra.com/cdn/shop/collections/Aquamarine.jpg?v=1741775603&width=600",
+    "sapphire": "YOUR_GOOGLE_IMAGE_URL_HERE",
+    "emerald": "https://gemsmantra.com/cdn/shop/collections/Emerald.jpg?v=1741776245&width=600",
+    "citrine": "https://gemsmantra.com/cdn/shop/collections/Citrine_84c9afeb-282e-45e5-be43-55d95ac94482.jpg?v=1741776146&width=600",
+    "opal": "https://gemsmantra.com/cdn/shop/collections/Opal_Stone.jpg?v=1741776699&width=600",
+    "hessonite": "https://gemsmantra.com/cdn/shop/collections/Hessonite_Gomed_-_Gemsmantra-4015530.jpg?v=1741776376&width=600",
+    "iolite": "https://gemsmantra.com/cdn/shop/collections/Iolite.jpg?v=1741776455&width=600",
+    "jasper": "https://gemsmantra.com/cdn/shop/collections/Jasper.jpg?v=1741776499&width=600",
+    "pearl": "https://gemsmantra.com/cdn/shop/collections/Pearl_be259c07-ed75-4fb1-9917-556239bd24cc.jpg?v=1741776790&width=600",
+    "lapis-lazuli": "https://gemsmantra.com/cdn/shop/collections/Lapis_Lazuli_Stone.jpg?v=1741776579&width=600",
+    "moonstone": "https://gemsmantra.com/cdn/shop/collections/Moonstone_Stone.jpg?v=1741776643&width=600",
+    "peridot": "https://gemsmantra.com/cdn/shop/collections/Peridot_Stone.jpg?v=1741776827&width=600",
+    "coral": "YOUR_GOOGLE_IMAGE_URL_HERE",
+    "tigers-eye": "https://gemsmantra.com/cdn/shop/collections/Tiger_Eye_Stone.jpg?v=1741775255&width=600",
+    "turquoise": "YOUR_GOOGLE_IMAGE_URL_HERE",
+    "zircon": "YOUR_GOOGLE_IMAGE_URL_HERE",
+    "red-coral": "https://gemsmantra.com/cdn/shop/collections/Red_Coral_4c139e18-3fcb-4bd7-9373-fd50cef02607.jpg?v=1741774981&width=600",
+    "opal-stone": "https://gemsmantra.com/cdn/shop/collections/Red_Coral_4c139e18-3fcb-4bd7-9373-fd50cef02607.jpg?v=1741774981&width=600",
+    "bi-color-tourmaline": "https://gemsmantra.com/cdn/shop/collections/Bi_Color_Tourmaline.jpg?v=1741774850&width=600",
+    "brazilian-emerald": "https://gemsmantra.com/cdn/shop/collections/Brazilian_Emerald.jpg?v=1741775863&width=600",
+    "burmese-ruby": "https://gemsmantra.com/cdn/shop/collections/Burmese_Ruby.jpg?v=1741775912&width=600",
+    "chrome-tourmaline": "https://gemsmantra.com/cdn/shop/collections/Chrome_Tourmaline.jpg?v=1741776107&width=600",
+    "colombian-emerald": "https://gemsmantra.com/cdn/shop/collections/Colombian_Emerald.jpg?v=1741776193&width=600",
+    "fire-opal": "https://gemsmantra.com/cdn/shop/collections/Fire_Opal.jpg?v=1741776292&width=600",
+    "green-tourmaline": "https://gemsmantra.com/cdn/shop/collections/Green_Tourmaline.jpg?v=1741776332&width=600",
+    "keshi-pearl": "https://gemsmantra.com/cdn/shop/collections/Keshi_Pearl.jpg?v=1741776540&width=600",
+    "panjshir-emerald": "https://gemsmantra.com/cdn/shop/collections/Panjshir_Afghanistan_Emerald.jpg?v=1741776750&width=600",
+    "pink-tourmaline": "https://gemsmantra.com/cdn/shop/collections/Pink_Tourmaline.jpg?v=1741774889&width=600",
+    "pitambari-neelam": "https://gemsmantra.com/cdn/shop/collections/Pitambari_Neelam_Stone.jpg?v=1741774936&width=600",
+    "rubellite": "https://gemsmantra.com/cdn/shop/collections/Rubellite.jpg?v=1741775020&width=600",
+    "russian-emerald": "https://gemsmantra.com/cdn/shop/collections/Russian_Emerald.jpg?v=1741775110&width=600",
+    "south-sea-pearl": "https://gemsmantra.com/cdn/shop/collections/South_Sea_Pearl_Stone.jpg?v=1741775155&width=600",
+    "star-ruby": "https://gemsmantra.com/cdn/shop/collections/Star_Ruby.jpg?v=1741776859&width=600",
+    "swat-emerald": "https://gemsmantra.com/cdn/shop/collections/Swat_Pakistan_Emerald.jpg?v=1741775207&width=600",
+    "zambian-emerald": "https://gemsmantra.com/cdn/shop/collections/Zambian_Emerald.jpg?v=1741775433&width=600",
+    "zircon-jarkan": "https://gemsmantra.com/cdn/shop/collections/Zircon_-_Jarkan_-_Gemsmantra-4015585.jpg?v=1741776937&width=600",
+    "african-ruby": "https://gemsmantra.com/cdn/shop/collections/African_Ruby.png?v=1741774797&width=600",
+    "bangkok-yellow-sapphire": "https://gemsmantra.com/cdn/shop/collections/Bangkok_Yellow_Sapphire.jpg?v=1741775734&width=600",
+    "yellow-sapphire": "https://gemsmantra.com/cdn/shop/collections/Yellow_Sapphire.jpg?v=1754975630&width=600",
+    "blue-sapphire": "https://gemsmantra.com/cdn/shop/collections/Blue_Sapphire_Neelam_-_Gemsmantra-4015499.jpg?v=1741775821&width=600",
+    "cat-s-eye": "https://gemsmantra.com/cdn/shop/collections/Cats_Eye_Stone.jpg?v=1741776031&width=600"
+  }
+}
+
+
+
+
+
+
+
+
+

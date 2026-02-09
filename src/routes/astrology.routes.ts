@@ -75,9 +75,7 @@ router.post('/barshafal', (req, res) => barshafalController.calculateBarshafal(r
 /**
  * Gochar: POST /api/v1/astrology/gochar
  */
-router.post('/gochar', (req, res) => gocharController.calculateGochar(req, res));
-
-/**
+router.post('/gochar', (req, res) => gocharController.calculateGochar(req, res));/**
  * Milan: POST /api/v1/astrology/milan
  */
 router.post('/milan', (req, res) => milanController.calculateMilan(req, res));/**

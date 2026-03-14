@@ -40,7 +40,8 @@ export class UserController {
 
   login = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      const result = await this.userService.login(req.body.username, req.body.password);
+      const rememberMe = Boolean(req.body.rememberMe);
+      const result = await this.userService.login(req.body.username, req.body.password, rememberMe);
       sendSuccess(res, result, 'Login successful');
     } catch (error) {
       next(error);

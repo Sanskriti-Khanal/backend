@@ -2,6 +2,9 @@ import rateLimit from 'express-rate-limit';
 import { Request } from 'express';
 import env from '@config/env';
 
+// Same message everywhere (wrong credentials / too many attempts) – after 3 rounds for login
+const RATE_LIMIT_MESSAGE = 'Too many attempts. Please try again after some time.';
+
 // Custom key generator that extracts IP from socket connection directly
 // This bypasses Express's `trust proxy` setting to avoid ERR_ERL_PERMISSIVE_TRUST_PROXY
 // We use req.socket.remoteAddress which is the actual TCP connection IP, not spoofable headers
@@ -22,9 +25,7 @@ export const apiLimiter = rateLimit({
   max: 100, // Limit each IP to 100 requests per windowMs
   message: {
     success: false,
-    error: {
-      message: 'Too many requests from this IP, please try again later.',
-    },
+    error: { message: RATE_LIMIT_MESSAGE },
   },
   standardHeaders: true,
   legacyHeaders: false,
@@ -46,9 +47,7 @@ export const paymentLimiter = rateLimit({
   max: 10, // Limit each IP to 10 payment requests per windowMs
   message: {
     success: false,
-    error: {
-      message: 'Too many payment requests, please try again later.',
-    },
+    error: { message: RATE_LIMIT_MESSAGE },
   },
   skipSuccessfulRequests: false,
   standardHeaders: true,
@@ -56,21 +55,33 @@ export const paymentLimiter = rateLimit({
   keyGenerator: getClientIp,
 });
 
-// Login rate limit
+// Login rate limit – after 3 wrong credentials show same message everywhere
 export const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 5, // Limit each IP to 5 login requests per windowMs (production)
+  max: 3, // 3 failed attempts per IP then block (wrong credentials)
   message: {
     success: false,
-    error: {
-      message: 'Too many login attempts, please try again later.',
-    },
+    error: { message: RATE_LIMIT_MESSAGE },
   },
   skipSuccessfulRequests: true,
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: getClientIp,
-  // In non-production, don't rate-limit login so testing isn't blocked
+  skip: () => env.NODE_ENV !== 'production',
+});
+
+// OTP rate limit (send-otp + verify-otp) – avoid SMS abuse; skip in dev for testing
+const OTP_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+export const otpLimiter = rateLimit({
+  windowMs: OTP_WINDOW_MS,
+  max: 10, // 10 OTP requests (send or verify) per 15 min per IP
+  message: {
+    success: false,
+    error: { message: RATE_LIMIT_MESSAGE },
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: getClientIp,
   skip: () => env.NODE_ENV !== 'production',
 });
 
@@ -80,9 +91,7 @@ export const webhookLimiter = rateLimit({
   max: 20, // Limit each IP to 20 webhook requests per minute
   message: {
     success: false,
-    error: {
-      message: 'Too many webhook requests, please try again later.',
-    },
+    error: { message: RATE_LIMIT_MESSAGE },
   },
   standardHeaders: true,
   legacyHeaders: false,

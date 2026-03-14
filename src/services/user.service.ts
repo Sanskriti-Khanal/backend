@@ -12,7 +12,7 @@ import {
   UnauthorizedError,
   BadRequestError,
 } from '@errors/AppError';
-import { isOTPExpired } from '@utils/otp.util';
+import { isOTPExpired, normalizePhoneToE164, normalizeOTP } from '@utils/otp.util';
 
 export class UserService {
   private userRepository: UserRepository;
@@ -33,8 +33,12 @@ export class UserService {
     birthTime?: string;
     birthPlace?: string;
   }): Promise<{ user: IUser; message: string }> {
+    const phone = normalizePhoneToE164(data.phone);
+    if (phone.length < 11) {
+      throw new BadRequestError('Phone must include country code (e.g. 9779812345678, 14155551234)');
+    }
     // Check if phone already exists
-    const existingPhone = await this.userRepository.findByPhone(data.phone);
+    const existingPhone = await this.userRepository.findByPhone(phone);
     if (existingPhone) {
       throw new ConflictError('Phone number already registered');
     }
@@ -43,7 +47,7 @@ export class UserService {
     let finalUsername = data.username?.trim().toLowerCase();
     if (!finalUsername || finalUsername.length < 3) {
       const slug = data.fullName.trim().toLowerCase().replace(/\s+/g, '');
-      finalUsername = `${slug}_${data.phone}`;
+      finalUsername = `${slug}_${phone}`;
     }
     const existingUsername = await this.userRepository.findByUsername(finalUsername);
     if (existingUsername) {
@@ -52,7 +56,7 @@ export class UserService {
 
     // Hash password if provided, otherwise create user without password (will be set after OTP verification)
     const userData: Partial<IUser> = {
-      phone: data.phone,
+      phone,
       username: finalUsername,
       fullName: data.fullName,
       role: data.role || UserRole.USER,
@@ -73,8 +77,8 @@ export class UserService {
     // Generate and send OTP
     const otp = this.otpService.generateOTP();
     const otpExpiry = this.otpService.getOTPExpiry();
-    await this.userRepository.updateOTP(data.phone, otp, otpExpiry);
-    await this.otpService.sendOTP(data.phone, otp);
+    await this.userRepository.updateOTP(phone, otp, otpExpiry);
+    await this.otpService.sendOTP(phone, otp);
 
     return {
       user,
@@ -83,24 +87,40 @@ export class UserService {
   }
 
   async sendOTP(phone: string): Promise<{ message: string }> {
-    const user = await this.userRepository.findByPhone(phone);
+    const normalized = normalizePhoneToE164(phone);
+    if (normalized.length < 11) {
+      throw new BadRequestError('Phone must include country code (e.g. 9779812345678, 14155551234)');
+    }
+    let user = await this.userRepository.findByPhone(normalized);
+    if (!user && normalized.startsWith('977') && normalized.length === 12) {
+      user = await this.userRepository.findByPhone(normalized.slice(-10));
+    }
     if (!user) {
       throw new NotFoundError('User not found');
     }
+    const phoneKey = user.phone!;
 
     const otp = this.otpService.generateOTP();
     const otpExpiry = this.otpService.getOTPExpiry();
-    await this.userRepository.updateOTP(phone, otp, otpExpiry);
-    await this.otpService.sendOTP(phone, otp);
+    await this.userRepository.updateOTP(phoneKey, otp, otpExpiry);
+    await this.otpService.sendOTP(normalized, otp);
 
     return { message: 'OTP sent to your phone number' };
   }
 
   async verifyOTP(phone: string, otp: string): Promise<{ user: IUser; requiresPassword: boolean }> {
-    const user = await this.userRepository.findByPhoneWithOTP(phone);
+    const normalized = normalizePhoneToE164(phone);
+    if (normalized.length < 11) {
+      throw new BadRequestError('Phone must include country code (e.g. 9779812345678, 14155551234)');
+    }
+    let user = await this.userRepository.findByPhoneWithOTP(normalized);
+    if (!user && normalized.startsWith('977') && normalized.length === 12) {
+      user = await this.userRepository.findByPhoneWithOTP(normalized.slice(-10));
+    }
     if (!user) {
       throw new NotFoundError('User not found');
     }
+    const phoneKey = user.phone!;
 
     if (!user.otp || !user.otpExpiry) {
       throw new BadRequestError('OTP not found. Please request a new OTP');
@@ -110,12 +130,16 @@ export class UserService {
       throw new BadRequestError('OTP expired. Please request a new OTP');
     }
 
-    if (user.otp !== otp) {
+    const otpTrimmed = normalizeOTP(otp);
+    const storedOtp = normalizeOTP(String(user.otp));
+    // In development, optional bypass so you can use a fixed code (e.g. 1234) instead of copying from terminal
+    const devBypass = env.NODE_ENV === 'development' && env.DEV_OTP_BYPASS && otpTrimmed === env.DEV_OTP_BYPASS.trim();
+    if (!devBypass && storedOtp !== otpTrimmed) {
       throw new UnauthorizedError('Invalid OTP');
     }
 
-    // Verify phone
-    const verifiedUser = await this.userRepository.verifyPhone(phone);
+    // Verify phone (use stored key for backward compat with 10-digit Nepal)
+    const verifiedUser = await this.userRepository.verifyPhone(phoneKey);
     if (!verifiedUser) {
       throw new NotFoundError('User not found');
     }
@@ -128,15 +152,19 @@ export class UserService {
     return { user: verifiedUser, requiresPassword: true }; // Always require password for new registrations
   }
 
-  async login(username: string, password: string): Promise<{ user: IUser; token: string }> {
-    // Support login by phone number, username, or full name
-    const isPhoneNumber = /^[0-9]{10}$/.test(username);
+  async login(username: string, password: string, rememberMe = false): Promise<{ user: IUser; token: string }> {
+    // Support login by phone number (with or without country code), username, or full name
+    const digitsOnly = username.replace(/\D/g, '');
+    const isPhoneNumber = digitsOnly.length >= 10 && /^[0-9]+$/.test(digitsOnly);
     const trimmed = username.trim().toLowerCase();
     
     let user: IUser | null;
     if (isPhoneNumber) {
-      // Login by phone number
-      user = await UserModel.findOne({ phone: username }).select('+password');
+      const phoneKey = normalizePhoneToE164(digitsOnly);
+      user = await UserModel.findOne({ phone: phoneKey }).select('+password');
+      if (!user && phoneKey.startsWith('977') && phoneKey.length === 12) {
+        user = await UserModel.findOne({ phone: phoneKey.slice(-10) }).select('+password');
+      }
     } else {
       // Try username first, then full name (case-insensitive match)
       user = await UserModel.findOne({ username: trimmed }).select('+password');
@@ -160,7 +188,7 @@ export class UserService {
       throw new UnauthorizedError('Account is deactivated');
     }
 
-    const token = this.generateToken(user);
+    const token = this.generateToken(user, rememberMe);
 
     return { user, token };
   }
@@ -264,10 +292,18 @@ export class UserService {
   }
 
   async setPassword(phone: string, password: string): Promise<{ message: string }> {
-    const user = await this.userRepository.findByPhone(phone);
+    const normalized = normalizePhoneToE164(phone);
+    if (normalized.length < 11) {
+      throw new BadRequestError('Phone must include country code (e.g. 9779812345678, 14155551234)');
+    }
+    let user = await this.userRepository.findByPhone(normalized);
+    if (!user && normalized.startsWith('977') && normalized.length === 12) {
+      user = await this.userRepository.findByPhone(normalized.slice(-10));
+    }
     if (!user) {
       throw new NotFoundError('User not found');
     }
+    const phoneKey = user.phone!;
 
     if (!user.isPhoneVerified) {
       throw new BadRequestError('Phone number must be verified before setting password');
@@ -277,16 +313,24 @@ export class UserService {
     const hashedPassword = await bcrypt.hash(password, 10);
 
     // Update password
-    await this.userRepository.updatePassword(phone, hashedPassword);
+    await this.userRepository.updatePassword(phoneKey, hashedPassword);
 
     return { message: 'Password set successfully' };
   }
 
   async resetPassword(phone: string, otp: string, newPassword: string): Promise<{ message: string }> {
-    const user = await this.userRepository.findByPhoneWithOTP(phone);
+    const normalized = normalizePhoneToE164(phone);
+    if (normalized.length < 11) {
+      throw new BadRequestError('Phone must include country code (e.g. 9779812345678, 14155551234)');
+    }
+    let user = await this.userRepository.findByPhoneWithOTP(normalized);
+    if (!user && normalized.startsWith('977') && normalized.length === 12) {
+      user = await this.userRepository.findByPhoneWithOTP(normalized.slice(-10));
+    }
     if (!user) {
       throw new NotFoundError('User not found');
     }
+    const phoneKey = user.phone!;
 
     if (!user.otp || !user.otpExpiry) {
       throw new BadRequestError('OTP not found. Please request a new OTP');
@@ -296,15 +340,18 @@ export class UserService {
       throw new BadRequestError('OTP expired. Please request a new OTP');
     }
 
-    if (user.otp !== otp) {
+    const otpTrimmed = normalizeOTP(otp);
+    const storedOtp = normalizeOTP(String(user.otp));
+    const devBypass = env.NODE_ENV === 'development' && env.DEV_OTP_BYPASS && otpTrimmed === env.DEV_OTP_BYPASS.trim();
+    if (!devBypass && storedOtp !== otpTrimmed) {
       throw new UnauthorizedError('Invalid OTP');
     }
 
     // Hash the new password
     const hashedPassword = await bcrypt.hash(newPassword, 10);
 
-    // Update password and clear OTP
-    await this.userRepository.updatePassword(phone, hashedPassword);
+    // Update password and clear OTP (use stored key for backward compat)
+    await this.userRepository.updatePassword(phoneKey, hashedPassword);
 
     return { message: 'Password reset successfully' };
   }
@@ -343,14 +390,15 @@ export class UserService {
     );
   }
 
-  private generateToken(user: IUser): string {
+  private generateToken(user: IUser, rememberMe = false): string {
     const payload = {
       id: user._id.toString(),
       role: user.role,
       phone: user.phone,
     };
+    const expiresIn = rememberMe ? env.JWT_EXPIRE_REMEMBER : env.JWT_EXPIRE;
     const privateKey = normalizePemFromEnv(env.JWT_PRIVATE_KEY);
-    return jwt.sign(payload, privateKey, { algorithm: 'RS256', expiresIn: env.JWT_EXPIRE } as SignOptions);
+    return jwt.sign(payload, privateKey, { algorithm: 'RS256', expiresIn } as SignOptions);
   }
 }
 

@@ -46,7 +46,7 @@ sentryRequestHandler(app);
 app.use((req, res, next) => {
   const path = req.path || req.url || '';
   const isCheckoutPage = path === '/nabil/checkout' || path === '/api/v1/payments/nabil/checkout';
-  
+
   if (isCheckoutPage) {
     // For checkout page, disable CSP (we'll set a permissive CSP in the controller)
     helmet({
@@ -64,7 +64,7 @@ const allowedOrigins = env.CORS_ORIGIN.split(',').map(origin => origin.trim());
 // Conditional CORS middleware - payment callbacks get permissive CORS
 app.use((req, res, next) => {
   const path = req.path || req.url || '';
-  const isPaymentCallback = 
+  const isPaymentCallback =
     path.startsWith('/api/v1/payments/nabil/approve') ||
     path.startsWith('/api/v1/payments/nabil/cancel') ||
     path.startsWith('/api/v1/payments/nabil/decline') ||
@@ -73,17 +73,17 @@ app.use((req, res, next) => {
     path.startsWith('/api/v1/payments/khalti/callback') ||
     path.startsWith('/api/v1/payments/webhook') ||
     path === '/nabil/checkout';
-  
+
   if (isPaymentCallback) {
     // Apply permissive CORS for payment callbacks (allow all origins)
     return cors({ origin: true })(req, res, next);
   } else {
     // Apply restrictive CORS for other routes
-    return cors({ 
+    return cors({
       origin: (origin, callback) => {
         // Allow requests with no origin (like mobile apps or curl requests)
         if (!origin) return callback(null, true);
-        
+
         // Check if origin is in allowed list
         if (allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
           callback(null, true);
@@ -91,7 +91,7 @@ app.use((req, res, next) => {
           callback(new Error('Not allowed by CORS'));
         }
       },
-      credentials: true 
+      credentials: true
     })(req, res, next);
   }
 });
@@ -111,6 +111,12 @@ app.use('/api/v1', apiLimiter);
 
 // Serve static files (for checkout.html)
 app.use(express.static(path.join(__dirname, 'public')));
+
+// Serve uploads directory for user avatars and other uploaded files
+const uploadsDir = path.join(__dirname, '../uploads');
+if (fs.existsSync(uploadsDir)) {
+  app.use('/uploads', express.static(uploadsDir));
+}
 
 // Root route and health check - should work without database
 app.get('/', (req, res) => {
@@ -141,7 +147,7 @@ app.get('/checkout.js', async (req, res, next) => {
       path.join(process.cwd(), 'backend/src/public/checkout.js'),
       path.join(__dirname, '../../public/checkout.js'),
     ];
-    
+
     let jsPath: string | null = null;
     for (const possiblePath of possiblePaths) {
       if (fs.existsSync(possiblePath)) {
@@ -149,7 +155,7 @@ app.get('/checkout.js', async (req, res, next) => {
         break;
       }
     }
-    
+
     if (jsPath) {
       const jsContent = fs.readFileSync(jsPath, 'utf-8');
       res.setHeader('Content-Type', 'application/javascript');
@@ -199,19 +205,19 @@ const ensureDatabaseConnection = async () => {
 // Place after health/root routes so they work even if DB is down
 app.use(async (req, res, next) => {
   // Skip database connection for health check, root, and GET checkout page (static HTML)
-  const skipDatabase = 
-    req.path === '/health' || 
+  const skipDatabase =
+    req.path === '/health' ||
     req.path === '/' ||
     (req.path === '/api/v1/payments/nabil/checkout' && req.method === 'GET') ||
     (req.path === '/nabil/checkout' && req.method === 'GET');
-  
+
   if (skipDatabase) {
     return next();
   }
-  
+
   // For payment callbacks and checkout POST, try to connect but don't fail if DB is down
   // (they need DB to save callback data, but should still work if DB fails)
-  const isPaymentCallback = 
+  const isPaymentCallback =
     req.path.startsWith('/api/v1/payments/nabil/approve') ||
     req.path.startsWith('/api/v1/payments/nabil/cancel') ||
     req.path.startsWith('/api/v1/payments/nabil/decline') ||
@@ -219,7 +225,7 @@ app.use(async (req, res, next) => {
     req.path.startsWith('/api/v1/payments/khalti/callback') ||
     (req.path.startsWith('/api/v1/payments/nabil/checkout') && req.method === 'POST') ||
     (req.path === '/nabil/checkout' && req.method === 'POST');
-  
+
   try {
     await ensureDatabaseConnection();
     next();
@@ -273,7 +279,7 @@ const isServerless = isVercel || process.env.AWS_LAMBDA_FUNCTION_NAME;
 if (!isServerless) {
   const startServer = async () => {
     await connectDatabase();
-    app.listen(env.PORT, () => {
+    app.listen(env.PORT, '0.0.0.0', () => {
       console.log(`🚀 Server running on port ${env.PORT}`);
     });
   };

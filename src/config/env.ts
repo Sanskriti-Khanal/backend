@@ -18,9 +18,16 @@ const envSchema = z.object({
   JWT_PRIVATE_KEY: z.string().min(100).refine((s) => s.includes('BEGIN'), { message: 'JWT_PRIVATE_KEY must be a PEM string (starts with -----BEGIN)' }),
   JWT_PUBLIC_KEY: z.string().min(100).refine((s) => s.includes('BEGIN'), { message: 'JWT_PUBLIC_KEY must be a PEM string (starts with -----BEGIN)' }),
   JWT_EXPIRE: z.string().default('7d'),
+  /** When rememberMe is true, token expires after this (e.g. 30d = 1 month). */
+  JWT_EXPIRE_REMEMBER: z.string().default('30d'),
   TWILIO_ACCOUNT_SID: z.string().optional(),
   TWILIO_AUTH_TOKEN: z.string().optional(),
   TWILIO_PHONE_NUMBER: z.string().optional(),
+  /** Alternative to Twilio: MSG91 (India/Nepal). Set MSG91_AUTH_KEY + MSG91_SENDER to use. */
+  MSG91_AUTH_KEY: z.string().optional(),
+  MSG91_SENDER: z.string().max(6).optional(),
+  /** In development, if set (e.g. "1234"), this OTP is accepted for any user so you don't need to copy from terminal. */
+  DEV_OTP_BYPASS: z.string().optional(),
   CORS_ORIGIN: z.string().default('http://localhost:3000'),
   // Payment Gateway
   RAZORPAY_KEY_ID: z.string().optional(),

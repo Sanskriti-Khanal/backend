@@ -218,5 +218,3 @@ module.exports = {
   getPlanetID,
   PLANET_IDS
 };
-
-

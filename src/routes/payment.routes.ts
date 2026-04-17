@@ -18,6 +18,8 @@ import {
   createKhaltiOrderSchema,
   khaltiCallbackSchema,
   khaltiVerifySchema,
+  revokeServiceAccessSchema,
+  updateOrderLocationSchema,
 } from '@validators/payment.validator';
 
 const router = Router();
@@ -172,10 +174,20 @@ router.get('/payments/:id', validate(paymentIdSchema), paymentController.getPaym
 // Get orders
 router.get('/orders', paymentController.getUserOrders);
 router.get('/orders/service-provider', paymentController.getServiceProviderOrders);
+router.patch(
+  '/orders/:id/location',
+  validate(updateOrderLocationSchema),
+  paymentController.updateOrderLocation
+);
 
 // Service access (Call & Chat unlock after payment)
 router.get('/service-access', paymentController.getUserServiceAccesses);
 router.get('/service-access/check', paymentController.checkServiceAccess);
+router.post(
+  '/service-access/revoke',
+  validate(revokeServiceAccessSchema),
+  paymentController.revokeCustomerServiceAccess
+);
 
 // Refund (Admin only)
 router.post(

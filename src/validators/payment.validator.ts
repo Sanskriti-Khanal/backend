@@ -41,6 +41,15 @@ export const createBookingPaymentSchema = z.object({
   }),
 });
 
+export const revokeServiceAccessSchema = z.object({
+  body: z.object({
+    customerUserId: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid customer user ID'),
+    serviceType: z.enum(['chat', 'call'], {
+      errorMap: () => ({ message: 'Service type must be either "chat" or "call"' }),
+    }),
+  }),
+});
+
 export const createJyotishServicePaymentSchema = z.object({
   body: z.object({
     serviceProviderId: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid service provider ID'),
@@ -80,7 +89,29 @@ export const orderIdSchema = z.object({
   }),
 });
 
+export const updateOrderLocationSchema = z.object({
+  params: z.object({
+    id: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid order ID'),
+  }),
+  body: z.object({
+    latitude: z.number().min(-90).max(90),
+    longitude: z.number().min(-180).max(180),
+    formattedAddress: z.string().min(3).max(500),
+    source: z.enum(['gps', 'manual', 'search']).optional(),
+    saveForFuture: z.boolean().optional(),
+  }),
+});
+
 // Nabil Bank payment validators
+const productLineItemsSchema = z
+  .array(
+    z.object({
+      productId: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid product ID'),
+      quantity: z.number().int().min(1, 'Quantity must be at least 1'),
+    })
+  )
+  .optional();
+
 export const createNabilOrderSchema = z.object({
   body: z.object({
     amount: z.number().positive('Amount must be positive'),
@@ -89,10 +120,19 @@ export const createNabilOrderSchema = z.object({
     paymentType: z.enum(['product', 'healing', 'puja', 'jyotish_booking', 'jyotish_service', 'package']),
     // Optional: specific order/booking IDs
     productOrderId: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid product order ID').optional(),
+    items: productLineItemsSchema,
     bookingId: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid booking ID').optional(),
     // Required for jyotish_service (Call & Chat)
     serviceProviderId: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid service provider ID').optional(),
     serviceType: z.enum(['chat', 'call']).optional(),
+    customerInfo: z.object({
+      name: z.string().optional(),
+      email: z.string().email().optional(),
+      phone: z.string().optional(),
+      sessionMode: z.enum(['online', 'offline']).optional(),
+      vaastuMode: z.enum(['online', 'offline']).optional(),
+    }).optional(),
+    preciseLocation: z.string().min(3).max(500).optional(),
   }).refine(
     (data) => {
       if (data.paymentType === 'jyotish_service') {
@@ -101,6 +141,17 @@ export const createNabilOrderSchema = z.object({
       return true;
     },
     { message: 'serviceProviderId and serviceType are required when paymentType is jyotish_service' }
+  ).refine(
+    (data) => {
+      const requiresLocation =
+        data.paymentType === 'product' ||
+        (data.paymentType === 'puja' &&
+          data.customerInfo?.sessionMode === 'offline') ||
+        (data.paymentType === 'jyotish_service' &&
+          data.customerInfo?.vaastuMode === 'offline');
+      return !requiresLocation || !!data.preciseLocation?.trim();
+    },
+    { message: 'preciseLocation is required before payment for product purchase, offline Puja, and offline Vaastu booking' }
   ),
 });
 
@@ -132,6 +183,7 @@ export const createKhaltiOrderSchema = z.object({
     orderId: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid order ID').optional(),
     paymentType: z.enum(['product', 'healing', 'puja', 'jyotish_booking', 'jyotish_service', 'package']),
     productOrderId: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid product order ID').optional(),
+    items: productLineItemsSchema,
     bookingId: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid booking ID').optional(),
     serviceProviderId: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid service provider ID').optional(),
     serviceType: z.enum(['chat', 'call']).optional(),
@@ -139,7 +191,10 @@ export const createKhaltiOrderSchema = z.object({
       name: z.string().optional(),
       email: z.string().email().optional(),
       phone: z.string().optional(),
+      sessionMode: z.enum(['online', 'offline']).optional(),
+      vaastuMode: z.enum(['online', 'offline']).optional(),
     }).optional(),
+    preciseLocation: z.string().min(3).max(500).optional(),
   }).refine(
     (data) => {
       if (data.paymentType === 'jyotish_service') {
@@ -148,8 +203,21 @@ export const createKhaltiOrderSchema = z.object({
       return true;
     },
     { message: 'serviceProviderId and serviceType are required when paymentType is jyotish_service' }
+  ).refine(
+    (data) => {
+      const requiresLocation =
+        data.paymentType === 'product' ||
+        (data.paymentType === 'puja' &&
+          data.customerInfo?.sessionMode === 'offline') ||
+        (data.paymentType === 'jyotish_service' &&
+          data.customerInfo?.vaastuMode === 'offline');
+      return !requiresLocation || !!data.preciseLocation?.trim();
+    },
+    { message: 'preciseLocation is required before payment for product purchase, offline Puja, and offline Vaastu booking' }
   ),
-});export const khaltiCallbackSchema = z.object({
+});
+
+export const khaltiCallbackSchema = z.object({
   query: z.object({
     pidx: z.string().optional(),
     paymentId: z.string().optional(),

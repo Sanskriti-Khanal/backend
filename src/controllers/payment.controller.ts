@@ -1,15 +1,16 @@
 import { Request, Response, NextFunction } from 'express';
 import { PaymentService } from '@services/payment.service';
 import { NabilService } from '@services/nabil.service';
-import { KhaltiService } from '@services/khalti.service';
+import { KhaltiService, pickKhaltiCustomerInfo } from '@services/khalti.service';
 import { sendSuccess } from '@utils/response.util';
 import { AuthRequest } from '@middleware/auth.middleware';
 import env from '@config/env';
 import { PaymentRepository } from '@repositories/payment.repository';
 import { NabilCallbackRepository } from '@repositories/nabil-callback.repository';
 import { JyotishRepository } from '@repositories/jyotish.repository';
+import { UserRepository } from '@repositories/user.repository';
 import { PaymentStatus, PaymentMethod, PaymentType } from '@models/Payment.model';
-import { OrderStatus } from '@models/Order.model';
+import { OrderStatus, OrderType } from '@models/Order.model';
 import { NabilCallbackStatus, NabilLogType } from '@models/NabilCallback.model';
 import { BadRequestError, NotFoundError } from '@errors/AppError';
 import { TransactionLogRepository } from '@repositories/transaction-log.repository';
@@ -25,6 +26,7 @@ export class PaymentController {
   private nabilCallbackRepository: NabilCallbackRepository;
   private transactionLogRepository: TransactionLogRepository;
   private jyotishRepository: JyotishRepository;
+  private userRepository: UserRepository;
   private static readonly SUPPORT_EMAIL = 'support@merosathi.co';
   private static readonly PAYMENT_SUCCESS_SUBTITLE =
     'Your transaction has been processed successfully. You can close this page and return to the app.';
@@ -60,6 +62,7 @@ export class PaymentController {
     this.nabilCallbackRepository = new NabilCallbackRepository();
     this.transactionLogRepository = new TransactionLogRepository();
     this.jyotishRepository = new JyotishRepository();
+    this.userRepository = new UserRepository();
   }
 
   /**
@@ -636,6 +639,63 @@ export class PaymentController {
     }
   };
 
+  updateOrderLocation = async (
+    req: AuthRequest,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> => {
+    try {
+      const order = await this.paymentRepository.findOrderById(req.params.id);
+      if (!order) {
+        throw new NotFoundError('Order not found');
+      }
+
+      const ownerId =
+        typeof order.user === 'object' && order.user !== null && '_id' in order.user
+          ? String((order.user as { _id: unknown })._id)
+          : String(order.user);
+
+      if (ownerId !== req.user!.id) {
+        throw new BadRequestError('Unauthorized');
+      }
+
+      const locationSupportedTypes = new Set<OrderType>([
+        OrderType.PRODUCT,
+        OrderType.HEALING,
+        OrderType.HEALING_PACKAGE,
+        OrderType.PUJA,
+        OrderType.PUJA_PACKAGE,
+      ]);
+
+      if (!locationSupportedTypes.has(order.orderType)) {
+        throw new BadRequestError(
+          'Location capture is not supported for this order type'
+        );
+      }
+
+      const updated = await this.paymentRepository.updateOrder(order._id.toString(), {
+        fulfillmentLocation: {
+          latitude: req.body.latitude,
+          longitude: req.body.longitude,
+          formattedAddress: req.body.formattedAddress,
+          source: req.body.source,
+          capturedAt: new Date(),
+        },
+      });
+
+      sendSuccess(
+        res,
+        {
+          orderId: updated?._id,
+          fulfillmentLocation: updated?.fulfillmentLocation,
+        },
+        'Order location saved successfully'
+      );
+    } catch (error) {
+      next(error);
+    }
+  };
+
   getServiceProviderOrders = async (
     req: AuthRequest,
     res: Response,
@@ -680,6 +740,28 @@ export class PaymentController {
     try {
       const accesses = await this.paymentService.getUserServiceAccesses(req.user!.id);
       sendSuccess(res, accesses);
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  /** Expert ends customer's paid chat/call session (customer must pay again to continue). */
+  revokeCustomerServiceAccess = async (
+    req: AuthRequest,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> => {
+    try {
+      const { customerUserId, serviceType } = req.body as {
+        customerUserId: string;
+        serviceType: 'chat' | 'call';
+      };
+      await this.paymentService.revokeCustomerAccessAsExpert(
+        req.user!.id,
+        customerUserId,
+        serviceType
+      );
+      sendSuccess(res, null, 'Consultation session ended for the customer');
     } catch (error) {
       next(error);
     }
@@ -742,8 +824,41 @@ export class PaymentController {
     next: NextFunction
   ): Promise<void> => {
     try {
-      const { amount, description, orderId, paymentType, productOrderId, bookingId, serviceProviderId, serviceType } = req.body;
+      const {
+        amount,
+        description,
+        orderId,
+        paymentType,
+        productOrderId,
+        bookingId,
+        serviceProviderId,
+        serviceType,
+        customerInfo,
+        preciseLocation,
+        items,
+      } = req.body;
       const userId = req.user!.id;
+      const normalizedPreciseLocation =
+        typeof preciseLocation === 'string' ? preciseLocation.trim() : '';
+      const isOfflinePujaBooking =
+        (paymentType === PaymentType.PUJA || paymentType === 'puja') &&
+        customerInfo?.sessionMode === 'offline';
+      const isOfflineVaastuBooking =
+        (paymentType === PaymentType.JYOTISH_SERVICE ||
+          paymentType === 'jyotish_service') &&
+        customerInfo?.vaastuMode === 'offline';
+
+      if (
+        (paymentType === PaymentType.PRODUCT ||
+          paymentType === 'product' ||
+          isOfflinePujaBooking ||
+          isOfflineVaastuBooking) &&
+        !normalizedPreciseLocation
+      ) {
+        throw new BadRequestError(
+          'Precise location is required before payment for product purchase, offline Puja, and offline Vaastu booking'
+        );
+      }
 
       // For jyotish_service (Call & Chat): create order+payment first, then link Nabil to that payment
       if (paymentType === 'jyotish_service' && serviceProviderId && serviceType) {
@@ -822,6 +937,77 @@ export class PaymentController {
       console.log('Decline URL:', declineURL);
       console.log('========================================');
 
+      let gatewayOrderId: string | undefined;
+
+      if (paymentType === PaymentType.PRODUCT || paymentType === 'product') {
+        const rawItems = Array.isArray(items) ? items : [];
+        const lineItems: Array<{ productId: string; quantity: number }> = rawItems
+          .filter(
+            (row: any) =>
+              row &&
+              typeof row.productId === 'string' &&
+              /^[0-9a-fA-F]{24}$/.test(row.productId) &&
+              typeof row.quantity === 'number' &&
+              Number.isFinite(row.quantity) &&
+              row.quantity >= 1
+          )
+          .map((row: any) => ({
+            productId: row.productId,
+            quantity: Math.floor(row.quantity),
+          }));
+        const effectiveItems =
+          lineItems.length > 0
+            ? lineItems
+            : productOrderId
+              ? [{ productId: productOrderId, quantity: 1 }]
+              : [];
+        if (effectiveItems.length === 0) {
+          throw new BadRequestError(
+            'Product checkout requires items (cart lines with productId and quantity) or productOrderId'
+          );
+        }
+        const { order, totalAmount } =
+          await this.paymentService.createPendingProductOrderForGateway(
+            userId,
+            effectiveItems,
+            normalizedPreciseLocation
+          );
+        if (Math.abs(amount - totalAmount) > 0.02) {
+          throw new BadRequestError(
+            `Amount mismatch: server total is NPR ${totalAmount}, request had NPR ${amount}`
+          );
+        }
+        gatewayOrderId = order._id.toString();
+      } else if (
+        (paymentType === PaymentType.HEALING ||
+          paymentType === PaymentType.PUJA ||
+          paymentType === 'healing' ||
+          paymentType === 'puja') &&
+        orderId
+      ) {
+        const existingOrder = await this.paymentRepository.findOrderById(orderId);
+        if (existingOrder) {
+          gatewayOrderId = existingOrder._id.toString();
+        } else {
+          const normalizedType =
+            paymentType === PaymentType.HEALING || paymentType === 'healing'
+              ? 'healing'
+              : 'puja';
+          const { order, totalAmount } =
+            await this.paymentService.createPendingServiceOrderForGateway(userId, {
+              paymentType: normalizedType,
+              referenceId: orderId,
+              preciseLocation: normalizedPreciseLocation || undefined,
+            });
+          if (Math.abs(amount - totalAmount) > 0.02) {
+            throw new BadRequestError(
+              `Amount mismatch: server total is NPR ${totalAmount}, request had NPR ${amount}`
+            );
+          }
+          gatewayOrderId = order._id.toString();
+        }
+      }
+
       // Create payment record first
       const paymentData: any = {
         user: userId,
@@ -835,17 +1021,27 @@ export class PaymentController {
         },
       };
 
-      if (orderId) {
-        paymentData.orderId = orderId;
-      }
-      if (productOrderId) {
-        paymentData.orderId = productOrderId;
+      if (gatewayOrderId) {
+        paymentData.orderId = gatewayOrderId;
+      } else {
+        if (orderId) {
+          paymentData.orderId = orderId;
+        }
+        if (productOrderId) {
+          paymentData.orderId = productOrderId;
+        }
       }
       if (bookingId) {
         paymentData.bookingId = bookingId;
       }
 
       const payment = await this.paymentRepository.createPayment(paymentData);
+
+      if (gatewayOrderId) {
+        await this.paymentRepository.updateOrder(gatewayOrderId, {
+          payment: payment._id,
+        });
+      }
 
       // Generate unique transaction ID for logging
       const transactionId = `TXN_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -1068,8 +1264,47 @@ export class PaymentController {
     next: NextFunction
   ): Promise<void> => {
     try {
-      const { amount, description, orderId, paymentType, productOrderId, bookingId, serviceProviderId, serviceType, customerInfo } = req.body;
+      const {
+        amount,
+        description,
+        orderId,
+        paymentType,
+        productOrderId,
+        bookingId,
+        serviceProviderId,
+        serviceType,
+        customerInfo,
+        preciseLocation,
+        items,
+      } = req.body;
       const userId = req.user!.id;
+      const normalizedPreciseLocation =
+        typeof preciseLocation === 'string' ? preciseLocation.trim() : '';
+      const isOfflinePujaBooking =
+        (paymentType === PaymentType.PUJA || paymentType === 'puja') &&
+        customerInfo?.sessionMode === 'offline';
+      const isOfflineVaastuBooking =
+        (paymentType === PaymentType.JYOTISH_SERVICE ||
+          paymentType === 'jyotish_service') &&
+        customerInfo?.vaastuMode === 'offline';
+
+      if (
+        (paymentType === PaymentType.PRODUCT ||
+          paymentType === 'product' ||
+          isOfflinePujaBooking ||
+          isOfflineVaastuBooking) &&
+        !normalizedPreciseLocation
+      ) {
+        throw new BadRequestError(
+          'Precise location is required before payment for product purchase, offline Puja, and offline Vaastu booking'
+        );
+      }
+
+      const payer = await this.userRepository.findById(userId);
+      const khaltiCustomerFallbacks = {
+        name: payer?.fullName,
+        phone: payer?.phone ?? req.user!.phone,
+      };
 
       // For jyotish_service (Call & Chat): create order+payment first, then link Khalti to that payment
       if (paymentType === 'jyotish_service' && serviceProviderId && serviceType) {
@@ -1087,18 +1322,20 @@ export class PaymentController {
         }
         if (!baseUrl.startsWith('https://')) baseUrl = baseUrl.replace(/^http:\/\//, 'https://');
         const returnUrl = `${baseUrl}/api/v1/payments/khalti/callback?paymentId=${payment._id}`;
+        const khaltiWebsiteUrl = this.khaltiService.websiteUrlForInitiate(baseUrl);
         const purchaseOrderId = `ORDER_${payment._id}_${Date.now()}`;
         const purchaseOrderName = description && description.trim().length >= 3 ? description.trim() : `Call/Chat Service - ${payment._id}`;
         const amountInPaisa = this.khaltiService.nprToPaisa(amount);
         const paymentRequest: any = {
           return_url: returnUrl,
-          website_url: baseUrl,
+          website_url: khaltiWebsiteUrl,
           amount: amountInPaisa,
           purchase_order_id: purchaseOrderId,
           purchase_order_name: purchaseOrderName,
         };
-        if (customerInfo && typeof customerInfo === 'object' && Object.keys(customerInfo).length > 0) {
-          paymentRequest.customer_info = customerInfo;
+        const khaltiCustomer = pickKhaltiCustomerInfo(customerInfo, khaltiCustomerFallbacks);
+        if (khaltiCustomer) {
+          paymentRequest.customer_info = khaltiCustomer;
         }
         const khaltiResponse = await this.khaltiService.initiatePayment(paymentRequest);
         await this.paymentRepository.updatePayment(payment._id.toString(), {
@@ -1139,12 +1376,84 @@ export class PaymentController {
       }
       
       const returnUrl = `${baseUrl}/api/v1/payments/khalti/callback`;
-      const websiteUrl = baseUrl;
+      const websiteUrl = this.khaltiService.websiteUrlForInitiate(baseUrl);
       
       // Log URLs for debugging
       console.log('🔗 Khalti Callback URLs:');
       console.log('  Return URL:', returnUrl);
-      console.log('  Website URL:', websiteUrl);
+      console.log('  Website URL (Khalti):', websiteUrl);
+      console.log('  API base:', baseUrl);
+
+      let gatewayOrderId: string | undefined;
+
+      if (paymentType === PaymentType.PRODUCT || paymentType === 'product') {
+        const rawItems = Array.isArray(items) ? items : [];
+        const lineItems: Array<{ productId: string; quantity: number }> = rawItems
+          .filter(
+            (row: any) =>
+              row &&
+              typeof row.productId === 'string' &&
+              /^[0-9a-fA-F]{24}$/.test(row.productId) &&
+              typeof row.quantity === 'number' &&
+              Number.isFinite(row.quantity) &&
+              row.quantity >= 1
+          )
+          .map((row: any) => ({
+            productId: row.productId,
+            quantity: Math.floor(row.quantity),
+          }));
+        const effectiveItems =
+          lineItems.length > 0
+            ? lineItems
+            : productOrderId
+              ? [{ productId: productOrderId, quantity: 1 }]
+              : [];
+        if (effectiveItems.length === 0) {
+          throw new BadRequestError(
+            'Product checkout requires items (cart lines with productId and quantity) or productOrderId'
+          );
+        }
+        const { order, totalAmount } =
+          await this.paymentService.createPendingProductOrderForGateway(
+            userId,
+            effectiveItems,
+            normalizedPreciseLocation
+          );
+        if (Math.abs(amount - totalAmount) > 0.02) {
+          throw new BadRequestError(
+            `Amount mismatch: server total is NPR ${totalAmount}, request had NPR ${amount}`
+          );
+        }
+        gatewayOrderId = order._id.toString();
+      } else if (
+        (paymentType === PaymentType.HEALING ||
+          paymentType === PaymentType.PUJA ||
+          paymentType === 'healing' ||
+          paymentType === 'puja') &&
+        orderId
+      ) {
+        const existingOrder = await this.paymentRepository.findOrderById(orderId);
+        if (existingOrder) {
+          gatewayOrderId = existingOrder._id.toString();
+        } else {
+          const normalizedType =
+            paymentType === PaymentType.HEALING || paymentType === 'healing'
+              ? 'healing'
+              : 'puja';
+          const { order, totalAmount } =
+            await this.paymentService.createPendingServiceOrderForGateway(userId, {
+              paymentType: normalizedType,
+              referenceId: orderId,
+              preciseLocation: normalizedPreciseLocation || undefined,
+            });
+          if (Math.abs(amount - totalAmount) > 0.02) {
+            throw new BadRequestError(
+              `Amount mismatch: server total is NPR ${totalAmount}, request had NPR ${amount}`
+            );
+          }
+          gatewayOrderId = order._id.toString();
+        }
+      }
 
       // Create payment record first
       const paymentData: any = {
@@ -1159,17 +1468,27 @@ export class PaymentController {
         },
       };
 
-      if (orderId) {
-        paymentData.orderId = orderId;
-      }
-      if (productOrderId) {
-        paymentData.orderId = productOrderId;
+      if (gatewayOrderId) {
+        paymentData.orderId = gatewayOrderId;
+      } else {
+        if (orderId) {
+          paymentData.orderId = orderId;
+        }
+        if (productOrderId) {
+          paymentData.orderId = productOrderId;
+        }
       }
       if (bookingId) {
         paymentData.bookingId = bookingId;
       }
 
       const payment = await this.paymentRepository.createPayment(paymentData);
+
+      if (gatewayOrderId) {
+        await this.paymentRepository.updateOrder(gatewayOrderId, {
+          payment: payment._id,
+        });
+      }
 
       // Unique purchase order ID
       const purchaseOrderId = `ORDER_${payment._id}_${Date.now()}`;
@@ -1199,9 +1518,9 @@ export class PaymentController {
         purchase_order_name: purchaseOrderName,
       };
       
-      // Only include customer_info if it exists and has at least one property
-      if (customerInfo && typeof customerInfo === 'object' && Object.keys(customerInfo).length > 0) {
-        paymentRequest.customer_info = customerInfo;
+      const khaltiCustomer = pickKhaltiCustomerInfo(customerInfo, khaltiCustomerFallbacks);
+      if (khaltiCustomer) {
+        paymentRequest.customer_info = khaltiCustomer;
       }
 
       // Initiate payment with Khalti
@@ -1290,6 +1609,7 @@ export class PaymentController {
 
       console.log('💾 Updating payment status to:', paymentStatus);
 
+      const previousStatus = payment.status;
       const updatedPayment = await this.paymentRepository.updatePayment(
         payment._id.toString(),
         {
@@ -1328,6 +1648,14 @@ export class PaymentController {
           console.log('✅ Service access granted successfully');
         } else {
           console.log('⚠️ Payment type is not JYOTISH_SERVICE, skipping service access grant');
+        }
+
+        if (
+          previousStatus !== PaymentStatus.SUCCESS &&
+          (updatedPayment.paymentType === PaymentType.PUJA ||
+            updatedPayment.paymentType === PaymentType.HEALING)
+        ) {
+          await this.paymentService.notifyServiceListingBooked(updatedPayment);
         }
       } else {
         console.log('⚠️ Payment not successful or missing orderId:', {
@@ -1388,6 +1716,8 @@ export class PaymentController {
         metadata: payment.metadata,
       });
 
+      const previousStatus = payment.status;
+
       // Verify payment with Khalti
       const verifyResponse = await this.khaltiService.verifyPayment(pidx);
 
@@ -1437,12 +1767,21 @@ export class PaymentController {
           await this.paymentService.grantServiceAccessForPayment(updatedPayment);
           console.log('✅ Service access granted successfully');
         }
+
+        if (
+          previousStatus !== PaymentStatus.SUCCESS &&
+          (updatedPayment.paymentType === PaymentType.PUJA ||
+            updatedPayment.paymentType === PaymentType.HEALING)
+        ) {
+          await this.paymentService.notifyServiceListingBooked(updatedPayment);
+        }
       }
 
       sendSuccess(res, {
         paymentId: payment._id,
         status: paymentStatus,
         pidx: verifyResponse.pidx,
+        orderId: updatedPayment?.orderId,
         transaction_id: verifyResponse.transaction_id,
         amount: verifyResponse.total_amount,
       }, 'Payment verified successfully');
@@ -1632,6 +1971,8 @@ export class PaymentController {
         statusResponse.orderStatus
       );
 
+      const previousStatus = payment.status;
+
       // Update payment status
       const updatedPayment = await this.paymentRepository.updatePayment(
         payment._id.toString(),
@@ -1650,9 +1991,19 @@ export class PaymentController {
           if (updatedPayment.paymentType === PaymentType.JYOTISH_SERVICE) {
             await this.paymentService.grantServiceAccessForPayment(updatedPayment);
           }
+          if (
+            previousStatus !== PaymentStatus.SUCCESS &&
+            (updatedPayment.paymentType === PaymentType.PUJA ||
+              updatedPayment.paymentType === PaymentType.HEALING)
+          ) {
+            await this.paymentService.notifyServiceListingBooked(updatedPayment);
+          }
         }
         if (updatedPayment.bookingId) {
-          // Update booking status if needed
+          await this.jyotishRepository.updateBooking(updatedPayment.bookingId.toString(), {
+            paid: true,
+            totalAmount: updatedPayment.amount,
+          });
         }
       }
 
@@ -3328,6 +3679,8 @@ ${decryptedSessionID ? `<SessionID>${decryptedSessionID}</SessionID>` : ''}
           }
 
           if (payment) {
+            const previousStatus = payment.status;
+
             // Update payment status to SUCCESS
             const updatedPayment = await this.paymentRepository.updatePayment(
               payment._id.toString(),
@@ -3353,6 +3706,13 @@ ${decryptedSessionID ? `<SessionID>${decryptedSessionID}</SessionID>` : ''}
               if (updatedPayment.paymentType === PaymentType.JYOTISH_SERVICE) {
                 await this.paymentService.grantServiceAccessForPayment(updatedPayment);
               }
+              if (
+                previousStatus !== PaymentStatus.SUCCESS &&
+                (updatedPayment.paymentType === PaymentType.PUJA ||
+                  updatedPayment.paymentType === PaymentType.HEALING)
+              ) {
+                await this.paymentService.notifyServiceListingBooked(updatedPayment);
+              }
             }
 
             // Update booking if payment has a booking
@@ -3361,6 +3721,7 @@ ${decryptedSessionID ? `<SessionID>${decryptedSessionID}</SessionID>` : ''}
                 updatedPayment.bookingId.toString(),
                 {
                   paid: true,
+                  totalAmount: updatedPayment.amount,
                 }
               );
               console.log('✅ Booking marked as paid:', updatedPayment.bookingId.toString());

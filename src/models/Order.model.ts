@@ -4,10 +4,17 @@ export enum OrderStatus {
   PENDING = 'pending',
   CONFIRMED = 'confirmed',
   PROCESSING = 'processing',
+  PACKING = 'packing',
+  SHIPPING = 'shipping',
   SHIPPED = 'shipped',
   DELIVERED = 'delivered',
   CANCELLED = 'cancelled',
   REFUNDED = 'refunded',
+}
+
+export enum OrderSessionStatus {
+  PENDING = 'pending',
+  COMPLETED = 'completed',
 }
 
 export enum OrderType {
@@ -45,6 +52,19 @@ export interface IOrder extends Document {
     country: string;
   };
   notes?: string;
+  fulfillmentLocation?: {
+    latitude: number;
+    longitude: number;
+    formattedAddress: string;
+    source?: 'gps' | 'manual' | 'search';
+    capturedAt?: Date;
+  };
+  sessionProgress?: Array<{
+    sessionNumber: number;
+    status: OrderSessionStatus;
+    listingId?: mongoose.Types.ObjectId;
+    completedAt?: Date;
+  }>;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -125,6 +145,45 @@ const orderSchema = new Schema<IOrder>(
     notes: {
       type: String,
     },
+    fulfillmentLocation: {
+      latitude: {
+        type: Number,
+      },
+      longitude: {
+        type: Number,
+      },
+      formattedAddress: {
+        type: String,
+      },
+      source: {
+        type: String,
+        enum: ['gps', 'manual', 'search'],
+      },
+      capturedAt: {
+        type: Date,
+      },
+    },
+    sessionProgress: [
+      {
+        sessionNumber: {
+          type: Number,
+          required: true,
+          min: 1,
+        },
+        status: {
+          type: String,
+          enum: Object.values(OrderSessionStatus),
+          default: OrderSessionStatus.PENDING,
+        },
+        listingId: {
+          type: Schema.Types.ObjectId,
+          ref: 'HealingListing',
+        },
+        completedAt: {
+          type: Date,
+        },
+      },
+    ],
   },
   {
     timestamps: true,

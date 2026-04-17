@@ -5,14 +5,18 @@ import { PujaRepository } from '@repositories/puja.repository';
 import { JyotishRepository } from '@repositories/jyotish.repository';
 import { UserRepository } from '@repositories/user.repository';
 import { ServiceAccessRepository } from '@repositories/service-access.repository';
+import { NotificationService } from './notification.service';
+import { NotificationType } from '@models/Notification.model';
 import {
   IPayment,
   PaymentStatus,
   PaymentMethod,
   PaymentType,
 } from '@models/Payment.model';
-import { IOrder, OrderStatus, OrderType } from '@models/Order.model';
-import { NotFoundError, BadRequestError } from '@errors/AppError';
+import { IOrder, OrderSessionStatus, OrderStatus, OrderType } from '@models/Order.model';
+import { BookingType } from '@models/JyotishBooking.model';
+import { NotFoundError, BadRequestError, ForbiddenError } from '@errors/AppError';
+import { isConsultationExpertRole, UserRole } from '@types';
 import crypto from 'crypto';
 import env from '@config/env';
 import logger from '@utils/logger';
@@ -28,6 +32,7 @@ export class PaymentService {
   private jyotishRepository: JyotishRepository;
   private userRepository: UserRepository;
   private serviceAccessRepository: ServiceAccessRepository;
+  private notificationService: NotificationService;
 
   constructor() {
     this.paymentRepository = new PaymentRepository();
@@ -37,6 +42,170 @@ export class PaymentService {
     this.jyotishRepository = new JyotishRepository();
     this.userRepository = new UserRepository();
     this.serviceAccessRepository = new ServiceAccessRepository();
+    this.notificationService = new NotificationService();
+  }
+
+  /**
+   * Notify healer / pujari when a listing/package is booked (call once when payment first succeeds).
+   */
+  async notifyServiceListingBooked(payment: IPayment): Promise<void> {
+    if (
+      payment.paymentType !== PaymentType.PUJA &&
+      payment.paymentType !== PaymentType.HEALING
+    ) {
+      return;
+    }
+    const orderRefId = payment.orderId?.toString();
+    if (!orderRefId) {
+      logger.warn('notifyServiceListingBooked: missing order reference', {
+        paymentId: payment._id?.toString(),
+      });
+      return;
+    }
+
+    const booker = await this.userRepository.findById(payment.user.toString());
+    const bookerName =
+      (booker?.fullName && String(booker.fullName).trim()) ||
+      booker?.username ||
+      'A customer';
+
+    try {
+      const orderDoc = await this.paymentRepository.findOrderById(orderRefId);
+      if (orderDoc) {
+        const firstItem = orderDoc.items[0];
+        const firstItemId = firstItem?.itemId?.toString();
+        if (!firstItemId) {
+          return;
+        }
+
+        if (payment.paymentType === PaymentType.HEALING) {
+          if (orderDoc.orderType === OrderType.HEALING_PACKAGE) {
+            const pkg = await this.healingRepository.findPackageById(firstItemId);
+            if (!pkg) return;
+            const providerId = PaymentService.extractRefId(pkg.healer);
+            if (!providerId) return;
+            await this.notificationService.createNotification(providerId, {
+              type: NotificationType.BOOKING_REMINDER,
+              title: 'New healing package booking',
+              message: `${bookerName} booked your healing package "${pkg.name}".`,
+              metadata: {
+                packageId: firstItemId,
+                orderId: orderDoc._id.toString(),
+                paymentId: payment._id.toString(),
+                kind: 'healing_package',
+              },
+            });
+            return;
+          }
+
+          const listing = await this.healingRepository.findListingById(firstItemId);
+          if (!listing) return;
+          const providerId = PaymentService.extractRefId(listing.healer);
+          if (!providerId) return;
+          await this.notificationService.createNotification(providerId, {
+            type: NotificationType.BOOKING_REMINDER,
+            title: 'New healing booking',
+            message: `${bookerName} booked your healing session "${listing.title}".`,
+            metadata: {
+              listingId: firstItemId,
+              orderId: orderDoc._id.toString(),
+              paymentId: payment._id.toString(),
+              kind: 'healing',
+            },
+          });
+          return;
+        }
+
+        if (orderDoc.orderType === OrderType.PUJA_PACKAGE) {
+          const pkg = await this.pujaRepository.findPackageById(firstItemId);
+          if (!pkg) return;
+          const providerId = PaymentService.extractRefId(pkg.pujari);
+          if (!providerId) return;
+          await this.notificationService.createNotification(providerId, {
+            type: NotificationType.BOOKING_REMINDER,
+            title: 'New puja package booking',
+            message: `${bookerName} booked your puja package "${pkg.name}".`,
+            metadata: {
+              packageId: firstItemId,
+              orderId: orderDoc._id.toString(),
+              paymentId: payment._id.toString(),
+              kind: 'puja_package',
+            },
+          });
+          return;
+        }
+
+        const listing = await this.pujaRepository.findListingById(firstItemId);
+        if (!listing) return;
+        const providerId = PaymentService.extractRefId(listing.pujari);
+        if (!providerId) return;
+        await this.notificationService.createNotification(providerId, {
+          type: NotificationType.BOOKING_REMINDER,
+          title: 'New puja booking',
+          message: `${bookerName} booked your puja "${listing.title}".`,
+          metadata: {
+            listingId: firstItemId,
+            orderId: orderDoc._id.toString(),
+            paymentId: payment._id.toString(),
+            kind: 'puja',
+          },
+        });
+        return;
+      }
+
+      // Backward compatibility for older payments where orderId stored listing/package id directly.
+      if (payment.paymentType === PaymentType.HEALING) {
+        const listing = await this.healingRepository.findListingById(orderRefId);
+        if (!listing) {
+          logger.warn('notifyServiceListingBooked: healing listing not found', { orderRefId });
+          return;
+        }
+        const providerId = PaymentService.extractRefId(listing.healer);
+        if (!providerId) return;
+        await this.notificationService.createNotification(providerId, {
+          type: NotificationType.BOOKING_REMINDER,
+          title: 'New healing booking',
+          message: `${bookerName} booked your healing session "${listing.title}".`,
+          metadata: {
+            listingId: orderRefId,
+            paymentId: payment._id.toString(),
+            kind: 'healing',
+          },
+        });
+        return;
+      }
+
+      const listing = await this.pujaRepository.findListingById(orderRefId);
+      if (!listing) {
+        logger.warn('notifyServiceListingBooked: puja listing not found', { orderRefId });
+        return;
+      }
+      const providerId = PaymentService.extractRefId(listing.pujari);
+      if (!providerId) return;
+      await this.notificationService.createNotification(providerId, {
+        type: NotificationType.BOOKING_REMINDER,
+        title: 'New puja booking',
+        message: `${bookerName} booked your puja "${listing.title}".`,
+        metadata: {
+          listingId: orderRefId,
+          paymentId: payment._id.toString(),
+          kind: 'puja',
+        },
+      });
+    } catch (err: unknown) {
+      logger.error('notifyServiceListingBooked failed', {
+        error: err instanceof Error ? err.message : err,
+        paymentId: payment._id.toString(),
+      });
+    }
+  }
+
+  private static extractRefId(ref: unknown): string | null {
+    if (ref == null) return null;
+    if (typeof ref === 'object' && ref !== null && '_id' in ref) {
+      return String((ref as { _id: unknown })._id);
+    }
+    return String(ref);
   }
 
   // Create payment intent for products
@@ -104,6 +273,194 @@ export class PaymentService {
     const paymentIntent = await this.createPaymentIntent(payment, order);
 
     return { order, payment, paymentIntent };
+  }
+
+  /**
+   * Creates a pending product order for Khalti/Nabil mobile checkout (no Payment row yet).
+   * Caller creates the gateway payment and links `payment` to this order afterward.
+   */
+  async createPendingProductOrderForGateway(
+    userId: string,
+    items: Array<{ productId: string; quantity: number }>,
+    preciseLocation?: string
+  ): Promise<{ order: IOrder; totalAmount: number }> {
+    if (!items.length) {
+      throw new BadRequestError('At least one product item is required');
+    }
+
+    let totalAmount = 0;
+    const orderItems: IOrder['items'] = [];
+
+    for (const item of items) {
+      const product = await this.productRepository.findById(item.productId);
+      if (!product) {
+        throw new NotFoundError(`Product ${item.productId} not found`);
+      }
+      if (!product.isActive) {
+        throw new BadRequestError(`Product ${item.productId} is not available`);
+      }
+      if (product.stock < item.quantity) {
+        throw new BadRequestError(`Insufficient stock for product ${product.name}`);
+      }
+
+      const itemTotal = product.price * item.quantity;
+      totalAmount += itemTotal;
+
+      orderItems.push({
+        itemId: product._id,
+        itemType: 'product',
+        name: product.name,
+        quantity: item.quantity,
+        price: product.price,
+        total: itemTotal,
+      });
+    }
+
+    const order = await this.paymentRepository.createOrder({
+      user: userId as any,
+      orderType: OrderType.PRODUCT,
+      items: orderItems,
+      totalAmount,
+      status: OrderStatus.PENDING,
+      ...(preciseLocation ? { notes: `Precise location: ${preciseLocation}` } : {}),
+    });
+
+    return { order, totalAmount };
+  }
+
+  /**
+   * Create a pending healing/puja order from a listing/package reference.
+   * Mobile sends listing/package id via `orderId` during checkout.
+   */
+  async createPendingServiceOrderForGateway(
+    userId: string,
+    input: { paymentType: 'healing' | 'puja'; referenceId: string; preciseLocation?: string }
+  ): Promise<{ order: IOrder; totalAmount: number }> {
+    const { paymentType, referenceId, preciseLocation } = input;
+
+    if (paymentType === 'healing') {
+      const pkg = await this.healingRepository.findPackageById(referenceId);
+      if (pkg && pkg.isActive) {
+        const listings = Array.isArray(pkg.listings) ? pkg.listings : [];
+        const sessionProgress = listings.map((listingRef, index) => {
+          const listingId = PaymentService.extractRefId(listingRef);
+          return {
+            sessionNumber: index + 1,
+            status: OrderSessionStatus.PENDING,
+            ...(listingId ? { listingId: listingId as any } : {}),
+          };
+        });
+        const totalSessions = sessionProgress.length || 1;
+
+        const order = await this.paymentRepository.createOrder({
+          user: userId as any,
+          orderType: OrderType.HEALING_PACKAGE,
+          items: [
+            {
+              itemId: pkg._id as any,
+              itemType: 'healing_package',
+              name: pkg.name,
+              quantity: 1,
+              price: pkg.price,
+              total: pkg.price,
+            },
+          ],
+          totalAmount: pkg.price,
+          status: OrderStatus.PENDING,
+          sessionProgress: sessionProgress.length
+            ? sessionProgress
+            : [
+                {
+                  sessionNumber: 1,
+                  status: OrderSessionStatus.PENDING,
+                },
+              ],
+          notes: `Total sessions: ${totalSessions}`,
+        });
+
+        if (preciseLocation) {
+          await this.paymentRepository.updateOrder(order._id.toString(), {
+            notes: `Total sessions: ${totalSessions}\nPrecise location: ${preciseLocation}`,
+          });
+        }
+
+        return { order, totalAmount: pkg.price };
+      }
+
+      const listing = await this.healingRepository.findListingById(referenceId);
+      if (!listing) {
+        throw new NotFoundError('Healing listing/package not found');
+      }
+      if (!listing.isActive) {
+        throw new BadRequestError('Healing offering is not available');
+      }
+      const order = await this.paymentRepository.createOrder({
+        user: userId as any,
+        orderType: OrderType.HEALING,
+        items: [
+          {
+            itemId: listing._id as any,
+            itemType: 'healing_listing',
+            name: listing.title,
+            quantity: 1,
+            price: listing.price,
+            total: listing.price,
+          },
+        ],
+        totalAmount: listing.price,
+        status: OrderStatus.PENDING,
+        ...(preciseLocation ? { notes: `Precise location: ${preciseLocation}` } : {}),
+      });
+      return { order, totalAmount: listing.price };
+    }
+
+    const pkg = await this.pujaRepository.findPackageById(referenceId);
+    if (pkg && pkg.isActive) {
+      const order = await this.paymentRepository.createOrder({
+        user: userId as any,
+        orderType: OrderType.PUJA_PACKAGE,
+        items: [
+          {
+            itemId: pkg._id as any,
+            itemType: 'puja_package',
+            name: pkg.name,
+            quantity: 1,
+            price: pkg.price,
+            total: pkg.price,
+          },
+        ],
+        totalAmount: pkg.price,
+        status: OrderStatus.PENDING,
+        ...(preciseLocation ? { notes: `Precise location: ${preciseLocation}` } : {}),
+      });
+      return { order, totalAmount: pkg.price };
+    }
+
+    const listing = await this.pujaRepository.findListingById(referenceId);
+    if (!listing) {
+      throw new NotFoundError('Puja listing/package not found');
+    }
+    if (!listing.isActive) {
+      throw new BadRequestError('Puja offering is not available');
+    }
+    const order = await this.paymentRepository.createOrder({
+      user: userId as any,
+      orderType: OrderType.PUJA,
+      items: [
+        {
+          itemId: listing._id as any,
+          itemType: 'puja_listing',
+          name: listing.title,
+          quantity: 1,
+          price: listing.price,
+          total: listing.price,
+        },
+      ],
+      totalAmount: listing.price,
+      status: OrderStatus.PENDING,
+      ...(preciseLocation ? { notes: `Precise location: ${preciseLocation}` } : {}),
+    });
+    return { order, totalAmount: listing.price };
   }
 
   // Create payment for healing/puja
@@ -219,10 +576,8 @@ export class PaymentService {
       throw new NotFoundError('Service provider not found');
     }
 
-    // Validate service provider is a jyotish expert (ASTROLOGY or VAASTU role)
-    const role = serviceProvider.role?.toUpperCase();
-    if (role !== 'ASTROLOGY' && role !== 'VAASTU' && role !== 'JYOTISH') {
-      throw new BadRequestError('Service provider is not a jyotish expert');
+    if (!isConsultationExpertRole(serviceProvider.role)) {
+      throw new BadRequestError('Service provider is not a consultation expert');
     }
 
     // Check if expert is active
@@ -230,23 +585,32 @@ export class PaymentService {
       throw new BadRequestError('Service provider is not active');
     }
 
-    // Check if expert is online
-    if (!serviceProvider.isOnline) {
-      throw new BadRequestError('Service provider is currently offline. Please try again when they are online.');
+    const isPremiumJyotish = serviceProvider.role === UserRole.PREMIUM_JYOTISH;
+    if (isPremiumJyotish && serviceType === 'chat') {
+      throw new BadRequestError('This expert offers call-only consultations.');
     }
 
-    // Check if expert is currently on a call (for call service type)
-    if (serviceType === 'call') {
-      const activeCall = await this.jyotishRepository.findActiveCallForJyotish(serviceProviderId);
-      if (activeCall) {
-        throw new BadRequestError('Service provider is currently on a call. Please try again later.');
+    // Premium jyotish: session is purchased as a ticket even when status is busy/offline
+    if (!isPremiumJyotish) {
+      if (!serviceProvider.isOnline) {
+        throw new BadRequestError(
+          'Service provider is currently offline. Please try again when they are online.'
+        );
       }
-    }
 
-    // Check if expert has active booking in progress
-    const activeBooking = await this.jyotishRepository.findActiveBookingForJyotish(serviceProviderId);
-    if (activeBooking) {
-      throw new BadRequestError('Service provider is currently busy. Please try again later.');
+      if (serviceType === 'call') {
+        const activeCall = await this.jyotishRepository.findActiveCallForJyotish(serviceProviderId);
+        if (activeCall) {
+          throw new BadRequestError('Service provider is currently on a call. Please try again later.');
+        }
+      }
+
+      const activeBooking = await this.jyotishRepository.findActiveBookingForJyotish(
+        serviceProviderId
+      );
+      if (activeBooking) {
+        throw new BadRequestError('Service provider is currently busy. Please try again later.');
+      }
     }
 
     // Validate amount
@@ -362,11 +726,105 @@ export class PaymentService {
         serviceType,
         orderId: payment.orderId.toString(),
       });
+      await this.notifyJyotishExpertOfServicePurchase(payment, serviceType as 'chat' | 'call');
     } catch (err: any) {
       // Idempotent: unique index may already have this combo
       if (err.code !== 11000) {
         logger.error('Failed to grant service access', { error: err, paymentId: payment._id.toString() });
       }
+    }
+
+    await this.syncJyotishBookingAfterServicePayment(payment);
+  }
+
+  /**
+   * Chat/call checkout uses Order + Payment (JYOTISH_SERVICE) without bookingId.
+   * Mirror paid + amount onto the open JyotishBooking so admin and reports stay accurate.
+   */
+  private async syncJyotishBookingAfterServicePayment(payment: IPayment): Promise<void> {
+    if (payment.paymentType !== PaymentType.JYOTISH_SERVICE || !payment.orderId) {
+      return;
+    }
+    const serviceProviderId = payment.metadata?.serviceProviderId;
+    const serviceType = payment.metadata?.serviceType;
+    if (
+      !serviceProviderId ||
+      (serviceType !== 'chat' && serviceType !== 'call')
+    ) {
+      return;
+    }
+
+    const order = await this.paymentRepository.findOrderById(payment.orderId.toString());
+    const amount =
+      order && typeof order.totalAmount === 'number'
+        ? order.totalAmount
+        : payment.amount;
+
+    const bookingType =
+      serviceType === 'chat' ? BookingType.CHAT : BookingType.CALL;
+
+    const booking = await this.jyotishRepository.findLatestUnpaidServiceBooking(
+      payment.user.toString(),
+      serviceProviderId,
+      bookingType
+    );
+
+    if (!booking) {
+      logger.debug('No unpaid jyotish booking to mark paid for service payment', {
+        paymentId: payment._id.toString(),
+        userId: payment.user.toString(),
+        serviceProviderId,
+        serviceType,
+      });
+      return;
+    }
+
+    await this.jyotishRepository.updateBooking(booking._id.toString(), {
+      paid: true,
+      totalAmount: amount,
+    });
+    logger.info('Synced JyotishBooking paid from JYOTISH_SERVICE payment', {
+      bookingId: booking._id.toString(),
+      paymentId: payment._id.toString(),
+      amount,
+    });
+  }
+
+  /** Inform the jyotish when a customer successfully pays for chat/call (once per new ServiceAccess row). */
+  private async notifyJyotishExpertOfServicePurchase(
+    payment: IPayment,
+    serviceType: 'chat' | 'call'
+  ): Promise<void> {
+    const jyotishId = payment.metadata?.serviceProviderId;
+    if (!jyotishId) return;
+
+    const booker = await this.userRepository.findById(payment.user.toString());
+    const bookerName =
+      (booker?.fullName && String(booker.fullName).trim()) ||
+      booker?.username ||
+      'A customer';
+
+    const modeLabel = serviceType === 'chat' ? 'chat' : 'call';
+
+    try {
+      await this.notificationService.createNotification(jyotishId, {
+        type: NotificationType.BOOKING_REMINDER,
+        title: `New paid ${modeLabel} session`,
+        message: `${bookerName} purchased a ${modeLabel} consultation and can connect with you now.`,
+        metadata: {
+          kind: 'jyotish_service',
+          serviceType,
+          paymentId: payment._id.toString(),
+          orderId: payment.orderId?.toString(),
+          customerId: payment.user.toString(),
+          ...(payment.bookingId ? { bookingId: payment.bookingId.toString() } : {}),
+        },
+      });
+    } catch (err: unknown) {
+      logger.error('notifyJyotishExpertOfServicePurchase failed', {
+        error: err instanceof Error ? err.message : err,
+        paymentId: payment._id.toString(),
+      });
     }
   }
 
@@ -443,6 +901,7 @@ export class PaymentService {
         updatedPayment.bookingId.toString(),
         {
           paid: true,
+          totalAmount: updatedPayment.amount,
         }
       );
     }
@@ -486,6 +945,26 @@ export class PaymentService {
   /** Get all service accesses for a user (unlocked call/chat per expert). */
   async getUserServiceAccesses(userId: string) {
     return this.serviceAccessRepository.findByUser(userId);
+  }
+
+  /**
+   * Astrologer ends the paid chat or call session for this customer.
+   * Customer loses service access until they pay again.
+   */
+  async revokeCustomerAccessAsExpert(
+    expertUserId: string,
+    customerUserId: string,
+    serviceType: 'chat' | 'call'
+  ): Promise<void> {
+    const expert = await this.userRepository.findById(expertUserId);
+    if (!expert || !isConsultationExpertRole(expert.role)) {
+      throw new ForbiddenError('Only astrologers can end a consultation session');
+    }
+    await this.serviceAccessRepository.revokeAccess(
+      customerUserId,
+      expertUserId,
+      serviceType
+    );
   }
 
   // Refund payment

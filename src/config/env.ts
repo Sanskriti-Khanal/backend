@@ -17,8 +17,15 @@ const envSchema = z.object({
   // RS256: private key for signing, public key for verification (more secure than HS256)
   JWT_PRIVATE_KEY: z.string().min(100).refine((s) => s.includes('BEGIN'), { message: 'JWT_PRIVATE_KEY must be a PEM string (starts with -----BEGIN)' }),
   JWT_PUBLIC_KEY: z.string().min(100).refine((s) => s.includes('BEGIN'), { message: 'JWT_PUBLIC_KEY must be a PEM string (starts with -----BEGIN)' }),
-  JWT_EXPIRE: z.string().default('7d'),
-  /** When rememberMe is true, token expires after this (e.g. 30d = 1 month). */
+  /** Short-lived access JWT (e.g. with refresh / remember-me). */
+  JWT_ACCESS_EXPIRE: z.string().default('15m'),
+  /** Refresh token lifetime when rememberMe is true. */
+  JWT_REFRESH_EXPIRE: z.string().default('7d'),
+  /** Access JWT when rememberMe is false (no refresh; session ends when client clears tokens). */
+  JWT_SESSION_EXPIRE: z.string().default('24h'),
+  /** @deprecated Legacy single expiry; defaults align with session-style token. */
+  JWT_EXPIRE: z.string().default('24h'),
+  /** @deprecated Legacy remember-me expiry; use JWT_ACCESS + JWT_REFRESH instead. */
   JWT_EXPIRE_REMEMBER: z.string().default('30d'),
   TWILIO_ACCOUNT_SID: z.string().optional(),
   TWILIO_AUTH_TOKEN: z.string().optional(),
@@ -64,8 +71,12 @@ const envSchema = z.object({
   KHALTI_API_URL: z.string().url().optional(), // Defaults to https://dev.khalti.com/api/v2
   KHALTI_SECRET_KEY: z.string().optional(),
   KHALTI_PUBLIC_KEY: z.string().optional(),
+  /** Must match the website URL registered in Khalti merchant settings. If unset, API BASE_URL is used (often api.*), which Khalti may reject—set to your public site e.g. https://merosathi.co */
+  KHALTI_WEBSITE_URL: z.string().url().optional(),
   // Sentry Error Tracking
   SENTRY_DSN: z.string().url().optional(),
+  /** Vedika astrology API (Ask MeroSathi); optional — route returns 503 if unset */
+  VEDIKA_API_KEY: z.string().min(1).optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;

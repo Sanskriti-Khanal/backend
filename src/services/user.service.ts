@@ -1,18 +1,27 @@
+import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import jwt, { SignOptions } from 'jsonwebtoken';
 import env from '@config/env';
 import { normalizePemFromEnv } from '@utils/jwt.util';
+import { parseExpiresInToMs } from '@utils/token-expiry.util';
 import { UserRepository } from '@repositories/user.repository';
 import { OTPService } from './otp.service';
+import { Types } from 'mongoose';
 import { UserModel, IUser } from '@models/User.model';
-import { UserRole } from '@types';
+import { RefreshTokenModel } from '@models/RefreshToken.model';
+import { UserRole, isConsultationExpertRole } from '@types';
 import {
   ConflictError,
   NotFoundError,
   UnauthorizedError,
   BadRequestError,
 } from '@errors/AppError';
-import { isOTPExpired, normalizePhoneToE164, normalizeOTP } from '@utils/otp.util';
+import {
+  isOTPExpired,
+  nepalPhoneLocalKeyIfApplicable,
+  normalizePhoneToE164,
+  normalizeOTP,
+} from '@utils/otp.util';
 
 export class UserService {
   private userRepository: UserRepository;
@@ -54,6 +63,9 @@ export class UserService {
       throw new ConflictError('Username already taken');
     }
 
+    const parsedDob = data.dob ? new Date(data.dob) : undefined;
+    const isValidDob = parsedDob && !Number.isNaN(parsedDob.getTime());
+
     // Hash password if provided, otherwise create user without password (will be set after OTP verification)
     const userData: Partial<IUser> = {
       phone,
@@ -61,6 +73,14 @@ export class UserService {
       fullName: data.fullName,
       role: data.role || UserRole.USER,
       isPhoneVerified: false,
+      dob: isValidDob ? parsedDob : undefined,
+      birthTime: data.birthTime?.trim() || undefined,
+      birthPlace: data.birthPlace?.trim() || undefined,
+      kundaliCompleted: Boolean(
+        isValidDob &&
+          data.birthTime?.trim() &&
+          data.birthPlace?.trim(),
+      ),
     };
 
     // Only add password if provided
@@ -92,8 +112,9 @@ export class UserService {
       throw new BadRequestError('Phone must include country code (e.g. 9779812345678, 14155551234)');
     }
     let user = await this.userRepository.findByPhone(normalized);
-    if (!user && normalized.startsWith('977') && normalized.length === 12) {
-      user = await this.userRepository.findByPhone(normalized.slice(-10));
+    const localKey = nepalPhoneLocalKeyIfApplicable(normalized);
+    if (!user && localKey) {
+      user = await this.userRepository.findByPhone(localKey);
     }
     if (!user) {
       throw new NotFoundError('User not found');
@@ -114,8 +135,9 @@ export class UserService {
       throw new BadRequestError('Phone must include country code (e.g. 9779812345678, 14155551234)');
     }
     let user = await this.userRepository.findByPhoneWithOTP(normalized);
-    if (!user && normalized.startsWith('977') && normalized.length === 12) {
-      user = await this.userRepository.findByPhoneWithOTP(normalized.slice(-10));
+    const localKeyVerify = nepalPhoneLocalKeyIfApplicable(normalized);
+    if (!user && localKeyVerify) {
+      user = await this.userRepository.findByPhoneWithOTP(localKeyVerify);
     }
     if (!user) {
       throw new NotFoundError('User not found');
@@ -152,7 +174,11 @@ export class UserService {
     return { user: verifiedUser, requiresPassword: true }; // Always require password for new registrations
   }
 
-  async login(username: string, password: string, rememberMe = false): Promise<{ user: IUser; token: string }> {
+  async login(
+    username: string,
+    password: string,
+    rememberMe = false
+  ): Promise<{ user: IUser; accessToken: string; refreshToken?: string; token: string }> {
     // Support login by phone number (with or without country code), username, or full name
     const digitsOnly = username.replace(/\D/g, '');
     const isPhoneNumber = digitsOnly.length >= 10 && /^[0-9]+$/.test(digitsOnly);
@@ -162,8 +188,9 @@ export class UserService {
     if (isPhoneNumber) {
       const phoneKey = normalizePhoneToE164(digitsOnly);
       user = await UserModel.findOne({ phone: phoneKey }).select('+password');
-      if (!user && phoneKey.startsWith('977') && phoneKey.length === 12) {
-        user = await UserModel.findOne({ phone: phoneKey.slice(-10) }).select('+password');
+      const localLogin = nepalPhoneLocalKeyIfApplicable(phoneKey);
+      if (!user && localLogin) {
+        user = await UserModel.findOne({ phone: localLogin }).select('+password');
       }
     } else {
       // Try username first, then full name (case-insensitive match)
@@ -188,9 +215,47 @@ export class UserService {
       throw new UnauthorizedError('Account is deactivated');
     }
 
-    const token = this.generateToken(user, rememberMe);
+    const accessExpires = rememberMe ? env.JWT_ACCESS_EXPIRE : env.JWT_SESSION_EXPIRE;
+    const accessToken = this.generateAccessToken(user, accessExpires);
 
-    return { user, token };
+    let refreshToken: string | undefined;
+    if (rememberMe) {
+      await RefreshTokenModel.deleteMany({ userId: user._id });
+      refreshToken = await this.createRefreshTokenForUser(user._id);
+    }
+
+    return { user, accessToken, refreshToken, token: accessToken };
+  }
+
+  /**
+   * Exchange a valid refresh token for a new access token and rotated refresh token.
+   */
+  async refreshTokens(plainRefreshToken: string): Promise<{
+    accessToken: string;
+    refreshToken: string;
+    token: string;
+  }> {
+    const tokenHash = crypto.createHash('sha256').update(plainRefreshToken).digest('hex');
+    const doc = await RefreshTokenModel.findOne({ tokenHash });
+    if (!doc || doc.expiresAt.getTime() <= Date.now()) {
+      throw new UnauthorizedError('Invalid or expired refresh token');
+    }
+
+    const user = await UserModel.findById(doc.userId);
+    if (!user || !user.isActive) {
+      await RefreshTokenModel.deleteOne({ _id: doc._id });
+      throw new UnauthorizedError('Invalid or expired refresh token');
+    }
+
+    await RefreshTokenModel.deleteOne({ _id: doc._id });
+    const newRefresh = await this.createRefreshTokenForUser(user._id);
+    const accessToken = this.generateAccessToken(user, env.JWT_ACCESS_EXPIRE);
+
+    return { accessToken, refreshToken: newRefresh, token: accessToken };
+  }
+
+  async revokeRefreshTokensForUser(userId: string): Promise<void> {
+    await RefreshTokenModel.deleteMany({ userId });
   }
 
   async getProfile(userId: string): Promise<IUser> {
@@ -202,6 +267,11 @@ export class UserService {
   }
 
   async updateProfile(userId: string, data: Partial<IUser>): Promise<IUser> {
+    const user = await this.userRepository.findById(userId);
+    if (!user) {
+      throw new NotFoundError('User not found');
+    }
+
     // Don't allow role changes through profile update
     if (data.role) {
       delete data.role;
@@ -215,15 +285,9 @@ export class UserService {
       }
     }
 
-    // Sync isOnline with availabilityStatus for experts (Jyotish/Vaastu/Pujari/Pandit)
+    // Sync isOnline with availabilityStatus for consultation experts
     if (data.availabilityStatus != null) {
-      const user = await this.userRepository.findById(userId);
-      const isExpert =
-        user &&
-        (user.role === UserRole.JYOTISH ||
-          String(user.role).toLowerCase() === 'vaastu' ||
-          user.role === UserRole.PUJARI ||
-          user.role === UserRole.PANDIT);
+      const isExpert = isConsultationExpertRole(user.role);
       if (isExpert) {
         (data as any).isOnline = data.availabilityStatus === 'active';
       } else {
@@ -231,11 +295,20 @@ export class UserService {
       }
     }
 
-    const user = await this.userRepository.update(userId, data);
-    if (!user) {
+    const nextDob = data.dob !== undefined ? data.dob : user.dob;
+    const nextBirthTime =
+      data.birthTime !== undefined ? data.birthTime : user.birthTime;
+    const nextBirthPlace =
+      data.birthPlace !== undefined ? data.birthPlace : user.birthPlace;
+    (data as any).kundaliCompleted = Boolean(
+      nextDob && nextBirthTime && nextBirthPlace,
+    );
+
+    const updatedUser = await this.userRepository.update(userId, data);
+    if (!updatedUser) {
       throw new NotFoundError('User not found');
     }
-    return user;
+    return updatedUser;
   }
 
   async changePassword(
@@ -264,14 +337,10 @@ export class UserService {
     if (!user) {
       throw new NotFoundError('User not found');
     }
-    const isExpert =
-      user.role === UserRole.JYOTISH ||
-      String(user.role).toLowerCase() === 'vaastu' ||
-      user.role === UserRole.PUJARI ||
-      user.role === UserRole.PANDIT;
+    const isExpert = isConsultationExpertRole(user.role);
     if (!isExpert) {
       throw new BadRequestError(
-        'Only Jyotish, Vaastu, Pujari or Pandit can update availability status'
+        'Only Jyotish, Premium Jyotish, or Vaastu experts can update availability status'
       );
     }
 
@@ -297,8 +366,9 @@ export class UserService {
       throw new BadRequestError('Phone must include country code (e.g. 9779812345678, 14155551234)');
     }
     let user = await this.userRepository.findByPhone(normalized);
-    if (!user && normalized.startsWith('977') && normalized.length === 12) {
-      user = await this.userRepository.findByPhone(normalized.slice(-10));
+    const localSet = nepalPhoneLocalKeyIfApplicable(normalized);
+    if (!user && localSet) {
+      user = await this.userRepository.findByPhone(localSet);
     }
     if (!user) {
       throw new NotFoundError('User not found');
@@ -324,8 +394,9 @@ export class UserService {
       throw new BadRequestError('Phone must include country code (e.g. 9779812345678, 14155551234)');
     }
     let user = await this.userRepository.findByPhoneWithOTP(normalized);
-    if (!user && normalized.startsWith('977') && normalized.length === 12) {
-      user = await this.userRepository.findByPhoneWithOTP(normalized.slice(-10));
+    const localReset = nepalPhoneLocalKeyIfApplicable(normalized);
+    if (!user && localReset) {
+      user = await this.userRepository.findByPhoneWithOTP(localReset);
     }
     if (!user) {
       throw new NotFoundError('User not found');
@@ -356,49 +427,96 @@ export class UserService {
     return { message: 'Password reset successfully' };
   }
 
-  async getExperts(role?: string | UserRole): Promise<IUser[]> {
-    // Map Flutter role values to backend UserRole
-    let mappedRole: UserRole | undefined;
+  /**
+   * Experts listing for Services UI. Aligns `availabilityStatus` with `isOnline` when they drift
+   * (e.g. DB had isOnline true but status still not_active) so clients show availability correctly.
+   */
+  async getExperts(role?: string | UserRole): Promise<Record<string, unknown>[]> {
+    let experts: IUser[];
+
     if (role) {
-      const roleUpper = typeof role === 'string' ? role.toUpperCase() : role;
+      const roleUpper =
+        typeof role === 'string' ? role.toUpperCase().trim() : String(role).toUpperCase();
       switch (roleUpper) {
         case 'ASTROLOGY':
+        case 'ASTROLOGER':
         case 'JYOTISH':
-          mappedRole = UserRole.JYOTISH;
+          experts = await this.userRepository.findActiveByRoleIn([
+            UserRole.JYOTISH,
+            UserRole.PREMIUM_JYOTISH,
+            'pujari',
+          ]);
           break;
-        default:
-          mappedRole = role as UserRole;
+        case 'VAASTU':
+          experts = await this.userRepository.findActiveByRoleIn([
+            UserRole.VAASTU,
+            'pandit',
+          ]);
+          break;
+        default: {
+          if (Object.values(UserRole).includes(role as UserRole)) {
+            const list = await this.userRepository.findByRole(role as UserRole);
+            experts = list.filter((u) => u.isActive);
+          } else {
+            experts = [];
+          }
+          break;
+        }
       }
+    } else {
+      experts = await this.userRepository.findAll().then((users) =>
+        users.filter((u) => u.isActive && isConsultationExpertRole(u.role)),
+      );
     }
 
-    if (mappedRole) {
-      // When a specific expert type is requested (e.g. JYOTISH),
-      // just return that exact role and only active users.
-      const experts = await this.userRepository.findByRole(mappedRole);
-      return experts.filter(u => u.isActive);
-    }
-
-    // Default: return only Jyotish and Vaastu experts (no healer, pujari,
-    // pandit, etc.). Vaastu is stored as raw string 'vaastu' in the DB.
-    return this.userRepository.findAll().then(users =>
-      users.filter(
-        u =>
-          (u.role === UserRole.JYOTISH ||
-            String(u.role).toLowerCase() === 'vaastu') &&
-          u.isActive,
-      ),
-    );
+    return experts.map((u) => UserService.expertToServicesPayload(u));
   }
 
-  private generateToken(user: IUser, rememberMe = false): string {
+  /** Plain object for GET /users/experts with consistent online vs availabilityStatus. */
+  static expertToServicesPayload(user: IUser): Record<string, unknown> {
+    const o: Record<string, unknown> =
+      typeof (user as any).toObject === 'function'
+        ? (user as any).toObject()
+        : { ...(user as any) };
+
+    if (!isConsultationExpertRole(o.role as string)) {
+      return o;
+    }
+
+    const status = String(o.availabilityStatus ?? '').toLowerCase();
+    const online = o.isOnline === true;
+
+    if (status === 'busy') {
+      return o;
+    }
+
+    if (online) {
+      o.availabilityStatus = 'active';
+    }
+
+    return o;
+  }
+
+  private generateAccessToken(user: IUser, expiresIn: string): string {
     const payload = {
       id: user._id.toString(),
       role: user.role,
       phone: user.phone,
     };
-    const expiresIn = rememberMe ? env.JWT_EXPIRE_REMEMBER : env.JWT_EXPIRE;
     const privateKey = normalizePemFromEnv(env.JWT_PRIVATE_KEY);
     return jwt.sign(payload, privateKey, { algorithm: 'RS256', expiresIn } as SignOptions);
+  }
+
+  private async createRefreshTokenForUser(userId: Types.ObjectId | string): Promise<string> {
+    const plain = crypto.randomBytes(32).toString('hex');
+    const tokenHash = crypto.createHash('sha256').update(plain).digest('hex');
+    const expiresAt = new Date(Date.now() + parseExpiresInToMs(env.JWT_REFRESH_EXPIRE));
+    await RefreshTokenModel.create({
+      userId,
+      tokenHash,
+      expiresAt,
+    });
+    return plain;
   }
 }
 

@@ -49,6 +49,12 @@ export class UserRepository {
     return UserModel.find({ role, isActive: true });
   }
 
+  /** Active users whose `role` is one of the given values (enum or legacy DB strings). */
+  async findActiveByRoleIn(roles: (UserRole | string)[]): Promise<IUser[]> {
+    if (roles.length === 0) return [];
+    return UserModel.find({ role: { $in: roles }, isActive: true });
+  }
+
   async findByIdsWithAvailabilityStatus(
     ids: mongoose.Types.ObjectId[],
     availabilityStatus: 'active' | 'not_active' | 'busy'
@@ -60,6 +66,26 @@ export class UserRepository {
       availabilityStatus,
     })
       .select('_id fullName avatarUrl availabilityStatus')
+      .exec();
+  }
+
+  /**
+   * Online Jyotish / Vaastu experts for puja “available pujari” (excludes premium_jyotish).
+   */
+  async findActiveConsultationExpertsForPuja(): Promise<IUser[]> {
+    const roles = [
+      UserRole.JYOTISH,
+      UserRole.VAASTU,
+      'pujari',
+      'pandit',
+    ];
+    return UserModel.find({
+      isActive: true,
+      isOnline: true,
+      role: { $in: roles },
+    })
+      .select('_id fullName avatarUrl availabilityStatus')
+      .sort({ fullName: 1 })
       .exec();
   }
 

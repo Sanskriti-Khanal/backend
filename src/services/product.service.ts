@@ -72,12 +72,33 @@ export class ProductService {
     );
   }
 
+  /**
+   * Slugs that share the same inventory (separate GemCategory docs, same catalog).
+   * e.g. products tagged `red-coral` still show under `coral` and vice versa.
+   */
+  private expandGemCategorySlugs(slug: string): string[] {
+    const normalized = slug.trim().toLowerCase();
+    const groups: string[][] = [
+      ['coral', 'red-coral'],
+      ['pearl', 'south-sea-pearl'],
+    ];
+    for (const g of groups) {
+      if (g.includes(normalized)) return g;
+    }
+    return [slug.trim()];
+  }
+
   async getProductsByGemCategorySlug(slug: string): Promise<IProduct[]> {
-    const category = await this.gemCategoryRepository.findBySlug(slug);
-    if (!category) {
+    const slugs = this.expandGemCategorySlugs(slug);
+    const categoryIds: string[] = [];
+    for (const s of slugs) {
+      const category = await this.gemCategoryRepository.findBySlug(s);
+      if (category) categoryIds.push(category._id.toString());
+    }
+    if (categoryIds.length === 0) {
       throw new NotFoundError('Gem category not found');
     }
-    return this.productRepository.findByGemCategory(category._id.toString());
+    return this.productRepository.findByGemCategories(categoryIds);
   }
 
   async updateProduct(

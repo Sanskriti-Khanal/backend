@@ -120,26 +120,15 @@ function calculateNavamsa(siderealLongitude) {
  * @returns {number} Navamsa house number (1-12)
  */
 function getNavamsaHouse(navamsaSign, navamsaAscendantSign) {
-  // Navamsa house calculation - planets are shifted one house ahead
-  // Standard formula gives house N, but should be house N-1 (or house 12 if N=1)
-  // Formula: ((planetSign - ascSign + 12) % 12) then subtract 1, wrapping around
-  // Normalize signs to 1-12
+  // House from navamsa lagna: same navamsa sign as ascendant => house 1
   let pSign = navamsaSign;
   let aSign = navamsaAscendantSign;
   while (pSign < 1) pSign += 12;
   while (pSign > 12) pSign -= 12;
   while (aSign < 1) aSign += 12;
   while (aSign > 12) aSign -= 12;
-  
-  // Calculate house using standard formula, then subtract 1 to fix the shift
-  let house = ((pSign - aSign + 12) % 12) + 1;
-  house = house - 1;
-  if (house < 1) house = 12; // Wrap around
-  
-  // Ensure house is 1-12
-  if (house < 1) house = 1;
-  if (house > 12) house = 12;
-  
+
+  const house = ((pSign - aSign + 12) % 12) + 1;
   return house;
 }
 

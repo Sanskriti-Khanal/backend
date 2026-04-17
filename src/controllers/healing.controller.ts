@@ -263,6 +263,22 @@ export class HealingController {
     }
   };
 
+  getReviewEligibility = async (
+    req: AuthRequest,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> => {
+    try {
+      const result = await this.healingService.getListingReviewEligibility(
+        req.params.id,
+        req.user!.id
+      );
+      sendSuccess(res, result);
+    } catch (error) {
+      next(error);
+    }
+  };
+
   updateReview = async (
     req: AuthRequest,
     res: Response,

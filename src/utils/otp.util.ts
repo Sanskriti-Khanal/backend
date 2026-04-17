@@ -33,6 +33,17 @@ export const normalizePhoneToE164 = (phone: string): string => {
   return digits;
 };
 
+/**
+ * Nepal mobiles are stored in Mongo either as full E.164 digits (`977` + 10 digits = 13 chars)
+ * or as 10-digit local (`98…`). After normalizing input to 13-digit form, a failed `findOne({ phone })`
+ * should retry with the last 10 digits — not length `12` (977+9), which never matches real NP mobiles.
+ */
+export const nepalPhoneLocalKeyIfApplicable = (normalizedDigits: string): string | null => {
+  if (!normalizedDigits.startsWith('977')) return null;
+  if (normalizedDigits.length === 13) return normalizedDigits.slice(-10);
+  return null;
+};
+
 /** Trim and normalize OTP for comparison (avoids whitespace/copy-paste issues). */
 export const normalizeOTP = (otp: string): string => (otp || '').trim();
 

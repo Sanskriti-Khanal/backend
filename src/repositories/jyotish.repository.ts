@@ -41,7 +41,7 @@ export class JyotishRepository {
   async findAllBookings(): Promise<IJyotishBooking[]> {
     return JyotishBookingModel.find()
       .populate('user', 'fullName username phone')
-      .populate('jyotish', 'fullName username specialtyTitle')
+      .populate('jyotish', 'fullName username specialtyTitle role')
       .sort({ createdAt: -1 });
   }
 
@@ -90,6 +90,26 @@ export class JyotishRepository {
       new: true,
       runValidators: true,
     });
+  }
+
+  /**
+   * Latest unpaid chat/call booking for this customer + expert (used to sync
+   * JYOTISH_SERVICE order payments onto the JyotishBooking document).
+   */
+  async findLatestUnpaidServiceBooking(
+    userId: string,
+    jyotishId: string,
+    type: BookingType
+  ): Promise<IJyotishBooking | null> {
+    return JyotishBookingModel.findOne({
+      user: userId,
+      jyotish: jyotishId,
+      type,
+      paid: false,
+      status: { $nin: [BookingStatus.COMPLETED, BookingStatus.CANCELLED] },
+    })
+      .sort({ createdAt: -1 })
+      .exec();
   }
 
   // Chat message methods

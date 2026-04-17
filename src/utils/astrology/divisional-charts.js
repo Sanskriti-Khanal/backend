@@ -474,8 +474,6 @@ function calculateDivisionalChartForAll(planets, ascendant, division, chartType)
       : planet.longitude;
     const divisional = calculateDivisionalChart(pLon, division, chartType);
     
-    // Navamsa (D-9) uses special house calculation that shifts houses by -1
-    // Other divisional charts use standard house calculation
     let house;
     if (chartType === 'navamsa' || division === 9) {
       house = navamsa.getNavamsaHouse(divisional.sign, ascDivisional.sign);

@@ -1,5 +1,7 @@
 import mongoose from 'mongoose';
 import { HealingRepository } from '@repositories/healing.repository';
+import { PaymentRepository } from '@repositories/payment.repository';
+import { OrderType } from '@models/Order.model';
 import { IHealingListing } from '@models/HealingListing.model';
 import { IHealingPackage } from '@models/HealingPackage.model';
 import { IHealingReview } from '@models/HealingReview.model';
@@ -8,9 +10,11 @@ import { UserRole } from '@types';
 
 export class HealingService {
   private healingRepository: HealingRepository;
+  private paymentRepository: PaymentRepository;
 
   constructor() {
     this.healingRepository = new HealingRepository();
+    this.paymentRepository = new PaymentRepository();
   }
 
   // Helper to extract healer ID from both populated and non-populated fields
@@ -253,12 +257,55 @@ export class HealingService {
       throw new ConflictError('You have already reviewed this listing');
     }
 
+    const hasPurchase = await this.paymentRepository.userHasCompletedServiceListingPurchase(
+      userId,
+      listingId,
+      OrderType.HEALING,
+      'healing_listing'
+    );
+    if (!hasPurchase) {
+      throw new BadRequestError(
+        'You can only review this service after completing a purchase'
+      );
+    }
+
     return this.healingRepository.createReview({
       listing: listingId as any,
       user: userId as any,
       rating: data.rating,
       comment: data.comment,
     });
+  }
+
+  async getListingReviewEligibility(
+    listingId: string,
+    userId: string
+  ): Promise<{
+    hasPurchased: boolean;
+    hasExistingReview: boolean;
+    canReview: boolean;
+  }> {
+    const listing = await this.healingRepository.findListingById(listingId);
+    if (!listing) {
+      throw new NotFoundError('Healing listing not found');
+    }
+
+    const hasPurchased = await this.paymentRepository.userHasCompletedServiceListingPurchase(
+      userId,
+      listingId,
+      OrderType.HEALING,
+      'healing_listing'
+    );
+    const existingReview = await this.healingRepository.findReviewByListingAndUser(
+      listingId,
+      userId
+    );
+
+    return {
+      hasPurchased,
+      hasExistingReview: !!existingReview,
+      canReview: hasPurchased && !existingReview,
+    };
   }
 
   async getListingReviews(listingId: string): Promise<IHealingReview[]> {

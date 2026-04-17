@@ -15,6 +15,7 @@ export interface IUser extends Document {
   dob?: Date;
   birthTime?: string;
   birthPlace?: string;
+  kundaliCompleted?: boolean;
   
   // Jyotish/Vaastu expert availability: active | not_active | busy
   availabilityStatus?: 'active' | 'not_active' | 'busy';
@@ -25,12 +26,18 @@ export interface IUser extends Document {
   avatarUrl?: string;
   callPrice?: number; // Price per hour for call
   chatPrice?: number; // Price per sector for chat
+  /** Vaastu / site consultation: remote vs in-person (optional; falls back to chat/call in clients). */
+  onlinePrice?: number;
+  offlinePrice?: number;
   experienceYears?: number; // Years of experience
   
   // Common fields
   isActive: boolean;
   createdAt: Date;
   updatedAt: Date;
+
+  /** Last Vedika AI query (UTC); one question per Asia/Kathmandu calendar day */
+  vedikaLastQueryAt?: Date;
 }
 
 const userSchema = new Schema<IUser>(
@@ -80,6 +87,10 @@ const userSchema = new Schema<IUser>(
     dob: Date,
     birthTime: String,
     birthPlace: String,
+    kundaliCompleted: {
+      type: Boolean,
+      default: false,
+    },
     // Jyotish/Vaastu expert availability
     availabilityStatus: {
       type: String,
@@ -102,6 +113,14 @@ const userSchema = new Schema<IUser>(
       type: Number,
       min: 0,
     },
+    onlinePrice: {
+      type: Number,
+      min: 0,
+    },
+    offlinePrice: {
+      type: Number,
+      min: 0,
+    },
     experienceYears: {
       type: Number,
       min: 0,
@@ -110,6 +129,7 @@ const userSchema = new Schema<IUser>(
       type: Boolean,
       default: true,
     },
+    vedikaLastQueryAt: Date,
   },
   {
     timestamps: true,

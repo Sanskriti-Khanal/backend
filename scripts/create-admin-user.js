@@ -11,7 +11,7 @@ const userSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true, lowercase: true },
   password: { type: String, required: true, select: false },
   fullName: { type: String, required: true },
-  role: { type: String, enum: ['user', 'healer', 'jyotish', 'pujari', 'pandit', 'admin'], default: 'user' },
+  role: { type: String, enum: ['user', 'healer', 'jyotish', 'premium_jyotish', 'vaastu', 'admin'], default: 'user' },
   isPhoneVerified: { type: Boolean, default: false },
   isActive: { type: Boolean, default: true },
   specialtyTitle: String,

@@ -3,8 +3,23 @@ import {
   IPayment,
   PaymentStatus,
 } from '@models/Payment.model';
-import { OrderModel, IOrder } from '@models/Order.model';
-import { FilterQuery } from 'mongoose';
+import {
+  OrderModel,
+  IOrder,
+  OrderStatus,
+  OrderType,
+} from '@models/Order.model';
+import { FilterQuery, Types } from 'mongoose';
+
+/** Orders in these statuses count as a completed purchase for leaving a service review. */
+const REVIEW_ELIGIBLE_ORDER_STATUSES: OrderStatus[] = [
+  OrderStatus.CONFIRMED,
+  OrderStatus.PROCESSING,
+  OrderStatus.PACKING,
+  OrderStatus.SHIPPING,
+  OrderStatus.SHIPPED,
+  OrderStatus.DELIVERED,
+];
 
 export class PaymentRepository {
   async createPayment(paymentData: Partial<IPayment>): Promise<IPayment> {
@@ -102,7 +117,7 @@ export class PaymentRepository {
   async findOrderById(id: string): Promise<IOrder | null> {
     return OrderModel.findById(id)
       .populate('user', 'fullName username phone')
-      .populate('serviceProvider', 'fullName username phone')
+      .populate('serviceProvider', 'fullName username phone role')
       .populate('payment');
   }
 
@@ -123,7 +138,7 @@ export class PaymentRepository {
   async findAllOrders(filter: FilterQuery<IOrder> = {}): Promise<IOrder[]> {
     return OrderModel.find(filter)
       .populate('user', 'fullName username phone')
-      .populate('serviceProvider', 'fullName username phone')
+      .populate('serviceProvider', 'fullName username phone role')
       .populate('payment')
       .sort({ createdAt: -1 });
   }
@@ -137,6 +152,35 @@ export class PaymentRepository {
       status: 'pending',
       createdAt: { $lt: expirationTime },
     });
+  }
+
+  /**
+   * True if the user has at least one non-pending service order that includes this listing.
+   */
+  async userHasCompletedServiceListingPurchase(
+    userId: string,
+    listingId: string,
+    orderType: OrderType.HEALING | OrderType.PUJA,
+    itemType: 'healing_listing' | 'puja_listing'
+  ): Promise<boolean> {
+    if (!Types.ObjectId.isValid(listingId)) {
+      return false;
+    }
+    const listingOid = new Types.ObjectId(listingId);
+    const doc = await OrderModel.findOne({
+      user: userId,
+      orderType,
+      status: { $in: REVIEW_ELIGIBLE_ORDER_STATUSES },
+      items: {
+        $elemMatch: {
+          itemId: listingOid,
+          itemType,
+        },
+      },
+    })
+      .select('_id')
+      .lean();
+    return doc != null;
   }
 }
 

@@ -79,6 +79,19 @@ export class ProductRepository {
       .sort({ createdAt: -1 });
   }
 
+  /** Products linked to any of the given gem categories (e.g. coral + red-coral). */
+  async findByGemCategories(gemCategoryIds: string[]): Promise<IProduct[]> {
+    if (gemCategoryIds.length === 0) return [];
+    const ids = gemCategoryIds.map((id) => new mongoose.Types.ObjectId(id));
+    return ProductModel.find({
+      gemCategory: { $in: ids },
+      isActive: true,
+    })
+      .populate('createdBy', 'fullName')
+      .populate('gemCategory', 'name slug')
+      .sort({ createdAt: -1 });
+  }
+
   async update(id: string, data: Partial<IProduct>): Promise<IProduct | null> {
     return ProductModel.findByIdAndUpdate(id, data, { new: true, runValidators: true });
   }

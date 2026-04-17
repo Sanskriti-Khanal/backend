@@ -210,6 +210,7 @@ export class JyotishController {
     try {
       const callRecord = await this.jyotishService.endCall(
         req.params.callId,
+        req.user!.id,
         req.body.duration
       );
       sendSuccess(res, callRecord, 'Call ended');

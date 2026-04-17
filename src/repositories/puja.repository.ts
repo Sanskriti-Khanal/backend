@@ -37,18 +37,6 @@ export class PujaRepository {
       .sort({ createdAt: -1 });
   }
 
-  /** Get distinct pujari IDs that have listings in the same category as the given listing (or all active listings if no category). */
-  async findPujariIdsForListingCategory(listingId: string): Promise<mongoose.Types.ObjectId[]> {
-    const listing = await PujaListingModel.findById(listingId).select('category').lean();
-    if (!listing) return [];
-    const filter: Record<string, unknown> = { isActive: true };
-    if (listing.category != null && String(listing.category).trim() !== '') {
-      filter.category = listing.category;
-    }
-    const ids = await PujaListingModel.find(filter).distinct('pujari').exec();
-    return ids;
-  }
-
   async searchListings(query: string): Promise<IPujaListing[]> {
     return PujaListingModel.find({
       $text: { $search: query },

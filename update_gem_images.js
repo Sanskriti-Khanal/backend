@@ -2,10 +2,14 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 
-// Admin token - UPDATE THIS WITH YOUR ACTUAL ADMIN TOKEN
-const TOKEN = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjY5NGMwMzk2ZmEzMTg1NmI0YzY4ZTA2NyIsInJvbGUiOiJhZG1pbiIsInBob25lIjoiOTgwMDAwMDAwMCIsImlhdCI6MTc2NjU4OTM0MSwiZXhwIjoxNzY3MTk0MTQxfQ.T-52JcoBAR5TniD_Vd0Q9seFKq6LmHpSZ687hwp5Z_k';
+// Prefer env token. Fallback kept for backward compatibility.
+const TOKEN =
+  process.env.ADMIN_TOKEN ||
+  'REPLACE_WITH_FRESH_ADMIN_TOKEN';
 
-const BASE_URL = 'http://localhost:3000/api/v1/gem-categories';
+const BASE_URL =
+  process.env.GEM_API_BASE_URL ||
+  'http://localhost:5050/api/v1/gem-categories';
 const JSON_FILE = path.join(__dirname, 'update_gem_images.json');
 
 async function updateGemImage(slug, imageUrl) {
@@ -43,12 +47,27 @@ async function updateGemImage(slug, imageUrl) {
 
     console.log(`  ✓ Updated ${slug}`);
   } catch (error) {
-    console.log(`  ✗ Failed to update ${slug}: ${error.response?.data?.message || error.message}`);
+    const status = error.response?.status;
+    const body = error.response?.data;
+    console.log(`  ✗ Failed to update ${slug}`);
+    if (status) console.log(`    status: ${status}`);
+    if (body) {
+      try {
+        console.log(`    response: ${JSON.stringify(body)}`);
+      } catch (_) {
+        console.log('    response: [unserializable]');
+      }
+    } else {
+      console.log(`    error: ${error.message}`);
+    }
   }
 }
 
 async function main() {
   console.log('Updating Gem Category Images from JSON file...\n');
+  if (!process.env.ADMIN_TOKEN) {
+    console.log('⚠️  ADMIN_TOKEN env var not set. If updates fail with 401, set a fresh admin token.');
+  }
 
   if (!fs.existsSync(JSON_FILE)) {
     console.error(`Error: ${JSON_FILE} not found!`);

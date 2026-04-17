@@ -1,6 +1,8 @@
 import mongoose from 'mongoose';
 import { PujaRepository } from '@repositories/puja.repository';
+import { PaymentRepository } from '@repositories/payment.repository';
 import { UserRepository } from '@repositories/user.repository';
+import { OrderType } from '@models/Order.model';
 import { IPujaListing } from '@models/PujaListing.model';
 import { IPujaPackage } from '@models/PujaPackage.model';
 import { IPujaReview } from '@models/PujaReview.model';
@@ -10,10 +12,12 @@ import { UserRole } from '@types';
 export class PujaService {
   private pujaRepository: PujaRepository;
   private userRepository: UserRepository;
+  private paymentRepository: PaymentRepository;
 
   constructor() {
     this.pujaRepository = new PujaRepository();
     this.userRepository = new UserRepository();
+    this.paymentRepository = new PaymentRepository();
   }
 
   // Helper to extract pujari ID from both populated and non-populated fields
@@ -56,17 +60,12 @@ export class PujaService {
     return listing;
   }
 
-  /** Get pujari profiles that offer this listing's category and are currently available (active). */
+  /** Online Jyotish / Vaastu only — excludes premium_jyotish (booking-only experts). */
   async getAvailablePujarisForListing(listingId: string): Promise<
     Array<{ _id: string; fullName: string; avatarUrl?: string; availabilityStatus?: string }>
   > {
     await this.getListingById(listingId);
-    const pujariIds = await this.pujaRepository.findPujariIdsForListingCategory(listingId);
-    if (pujariIds.length === 0) return [];
-    const users = await this.userRepository.findByIdsWithAvailabilityStatus(
-      pujariIds,
-      'active'
-    );
+    const users = await this.userRepository.findActiveConsultationExpertsForPuja();
     return users.map((u: any) => ({
       _id: u._id?.toString() ?? '',
       fullName: u.fullName ?? '',
@@ -75,18 +74,13 @@ export class PujaService {
     }));
   }
 
-  /** Get the pujari who offers this package (single pujari, same response shape as listing). */
+  /** Same expert pool as listing available-pujaris: online Jyotish/Vaastu, no premium_jyotish. */
   async getAvailablePujarisForPackage(packageId: string): Promise<
     Array<{ _id: string; fullName: string; avatarUrl?: string; availabilityStatus?: string }>
   > {
     const pkg = await this.pujaRepository.findPackageById(packageId);
     if (!pkg) throw new NotFoundError('Puja package not found');
-    const pujariId = this.getPujariId(pkg.pujari);
-    if (!pujariId) return [];
-    const users = await this.userRepository.findByIdsWithAvailabilityStatus(
-      [pujariId as any],
-      'active'
-    );
+    const users = await this.userRepository.findActiveConsultationExpertsForPuja();
     return users.map((u: any) => ({
       _id: u._id?.toString() ?? '',
       fullName: u.fullName ?? '',
@@ -308,12 +302,55 @@ export class PujaService {
       throw new ConflictError('You have already reviewed this listing');
     }
 
+    const hasPurchase = await this.paymentRepository.userHasCompletedServiceListingPurchase(
+      userId,
+      listingId,
+      OrderType.PUJA,
+      'puja_listing'
+    );
+    if (!hasPurchase) {
+      throw new BadRequestError(
+        'You can only review this service after completing a purchase'
+      );
+    }
+
     return this.pujaRepository.createReview({
       listing: listingId as any,
       user: userId as any,
       rating: data.rating,
       comment: data.comment,
     });
+  }
+
+  async getListingReviewEligibility(
+    listingId: string,
+    userId: string
+  ): Promise<{
+    hasPurchased: boolean;
+    hasExistingReview: boolean;
+    canReview: boolean;
+  }> {
+    const listing = await this.pujaRepository.findListingById(listingId);
+    if (!listing) {
+      throw new NotFoundError('Puja listing not found');
+    }
+
+    const hasPurchased = await this.paymentRepository.userHasCompletedServiceListingPurchase(
+      userId,
+      listingId,
+      OrderType.PUJA,
+      'puja_listing'
+    );
+    const existingReview = await this.pujaRepository.findReviewByListingAndUser(
+      listingId,
+      userId
+    );
+
+    return {
+      hasPurchased,
+      hasExistingReview: !!existingReview,
+      canReview: hasPurchased && !existingReview,
+    };
   }
 
   async getListingReviews(listingId: string): Promise<IPujaReview[]> {

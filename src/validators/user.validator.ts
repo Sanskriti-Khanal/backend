@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { UserRole } from '@types';
 
 // Phone: 10–15 digits with country code (worldwide: Nepal 977…, USA 1…, UAE 971…, India 91…)
 const phoneSchema = z.string().regex(/^[0-9]{10,15}$/, 'Phone must be 10–15 digits (with country code)');
@@ -9,7 +10,10 @@ export const registerUserSchema = z.object({
     username: z.string().min(3, 'Username must be at least 3 characters').optional(),
     password: z.string().min(6, 'Password must be at least 6 characters').optional(),
     fullName: z.string().min(2, 'Full name must be at least 2 characters'),
-    role: z.enum(['user', 'healer', 'jyotish', 'pujari', 'pandit']).optional(),
+    role: z
+      .nativeEnum(UserRole)
+      .refine((r) => r !== UserRole.ADMIN, { message: 'Invalid role' })
+      .optional(),
     dob: z.string().optional(),
     birthTime: z.string().optional(),
     birthPlace: z.string().optional(),
@@ -44,6 +48,12 @@ export const loginSchema = z.object({
   }),
 });
 
+export const refreshTokenSchema = z.object({
+  body: z.object({
+    refreshToken: z.string().min(1, 'Refresh token is required'),
+  }),
+});
+
 export const updateProfileSchema = z.object({
   body: z.object({
     fullName: z.string().min(2).optional(),
@@ -56,6 +66,8 @@ export const updateProfileSchema = z.object({
     avatarUrl: z.string().optional(),
     callPrice: z.number().min(0).optional(),
     chatPrice: z.number().min(0).optional(),
+    onlinePrice: z.number().min(0).optional(),
+    offlinePrice: z.number().min(0).optional(),
     experienceYears: z.number().int().min(0).optional(),
     availabilityStatus: z.enum(['active', 'not_active', 'busy']).optional(),
   }),

@@ -413,8 +413,10 @@ class BarshafalService {
     // But for database lookup, we use the house index directly (1-12)
     const munthaAscID = munthaHouseIndex;
 
-    // Get Muntha Lagna prediction
-    const munthaLagnaPrediction = mj1Db.getMunthaLagnaPrediction(munthaAscID);
+    const genderRaw = normalizedBirth.gender;
+
+    // Get Muntha Lagna prediction (तपाईं → पुरुष / स्त्री by gender)
+    const munthaLagnaPrediction = mj1Db.getMunthaLagnaPrediction(munthaAscID, genderRaw);
 
     // Calculate annual dasha periods for date ranges
     // Use Vimshottari dasha but with annual periods (1 year = 1 dasha period)
@@ -455,7 +457,12 @@ class BarshafalService {
       // Get prediction from varsafal table
       // IMPORTANT: Use year start chart's ascendant sign (not Muntha house) as AscID
       // This matches the Java implementation: varsafalLagna.OooO0Oo().OooOo0O()
-      const prediction = mj1Db.getMunthaDasaPredictionBYDasa(yearStartAscendantSign, houseID, planetID);
+      const prediction = mj1Db.getMunthaDasaPredictionBYDasa(
+        yearStartAscendantSign,
+        houseID,
+        planetID,
+        genderRaw
+      );
       
       // Find date range for this planet's dasha period
       const dashaPeriod = annualDashaPeriods.find(p => p.planetId === planet.id);

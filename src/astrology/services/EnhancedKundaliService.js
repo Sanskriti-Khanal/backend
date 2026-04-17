@@ -274,7 +274,7 @@ class EnhancedKundaliService {
   }
 
   /**
-   * Get जातक विवरण (Jaatak Details) - native details with house-wise predictions
+   * Get व्यक्तिको जानकारी (Jaatak Details) - native details with house-wise predictions
    * Matches Java JaatakDetails fragment: name, DOB, age, TOB, place, panchanga, planet table, house predictions, शुभ/अशुभ
    * When kundaliChart (UniverseLite) is provided, uses its planets/houses so ग्रह स्थिति and घर अनुसार ग्रह विवरण match.
    *

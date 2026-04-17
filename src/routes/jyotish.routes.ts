@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { JyotishController } from '@controllers/jyotish.controller';
 import { validate } from '@middleware/validation.middleware';
 import { authenticate, authorize } from '@middleware/auth.middleware';
-import { UserRole } from '@types';
+import { CONSULTATION_EXPERT_ROLES } from '@types';
 import {
   createBookingSchema,
   bookingIdSchema,
@@ -34,13 +34,13 @@ router.get(
 router.get(
   '/bookings/active',
   authenticate,
-  authorize(UserRole.JYOTISH),
+  authorize(...CONSULTATION_EXPERT_ROLES),
   jyotishController.getActiveBookings
 );
 router.get(
   '/bookings/jyotish',
   authenticate,
-  authorize(UserRole.JYOTISH),
+  authorize(...CONSULTATION_EXPERT_ROLES),
   jyotishController.getJyotishBookings
 );
 router.get(
@@ -116,28 +116,28 @@ router.get(
 router.post(
   '/notes/user/:userId',
   authenticate,
-  authorize(UserRole.JYOTISH),
+  authorize(...CONSULTATION_EXPERT_ROLES),
   validate(createNoteSchema),
   jyotishController.createNote
 );
 router.get(
   '/notes/user/:userId',
   authenticate,
-  authorize(UserRole.JYOTISH),
+  authorize(...CONSULTATION_EXPERT_ROLES),
   validate(getNotesSchema),
   jyotishController.getNotesForUser
 );
 router.put(
   '/notes/:noteId',
   authenticate,
-  authorize(UserRole.JYOTISH),
+  authorize(...CONSULTATION_EXPERT_ROLES),
   validate(updateNoteSchema),
   jyotishController.updateNote
 );
 router.delete(
   '/notes/:noteId',
   authenticate,
-  authorize(UserRole.JYOTISH),
+  authorize(...CONSULTATION_EXPERT_ROLES),
   validate(noteIdSchema),
   jyotishController.deleteNote
 );

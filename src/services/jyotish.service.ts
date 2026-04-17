@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import { JyotishRepository } from '@repositories/jyotish.repository';
 import { UserRepository } from '@repositories/user.repository';
+import { ServiceAccessRepository } from '@repositories/service-access.repository';
 import {
   IJyotishBooking,
   BookingType,
@@ -13,18 +14,26 @@ import {
   NotFoundError,
   BadRequestError,
   ConflictError,
+  ForbiddenError,
 } from '@errors/AppError';
-import { UserRole } from '@types';
+import { UserRole, isConsultationExpertRole } from '@types';
+import { NotificationService } from './notification.service';
+import { NotificationType } from '@models/Notification.model';
+import logger from '@utils/logger';
 
 const FREE_MINUTES = 1; // 1 minute free chat/call
 
 export class JyotishService {
   private jyotishRepository: JyotishRepository;
   private userRepository: UserRepository;
+  private serviceAccessRepository: ServiceAccessRepository;
+  private notificationService: NotificationService;
 
   constructor() {
     this.jyotishRepository = new JyotishRepository();
     this.userRepository = new UserRepository();
+    this.serviceAccessRepository = new ServiceAccessRepository();
+    this.notificationService = new NotificationService();
   }
 
   /**
@@ -56,13 +65,17 @@ export class JyotishService {
   ): Promise<IJyotishBooking> {
     // Verify jyotish exists and is active
     const jyotish = await this.userRepository.findById(data.jyotishId);
-    if (!jyotish || jyotish.role !== UserRole.JYOTISH || !jyotish.isActive) {
-      throw new NotFoundError('Jyotish not found or inactive');
+    if (!jyotish || !isConsultationExpertRole(jyotish.role) || !jyotish.isActive) {
+      throw new NotFoundError('Expert not found or inactive');
     }
 
-    // Check if jyotish is online (for immediate bookings)
-    if (!data.scheduledAt && !jyotish.isOnline) {
-      throw new BadRequestError('Jyotish is currently offline');
+    // Premium jyotish: allow booking after session ticket (payment) even if offline/busy
+    const isPremiumJyotish = jyotish.role === UserRole.PREMIUM_JYOTISH;
+    if (isPremiumJyotish && data.type === BookingType.CHAT) {
+      throw new BadRequestError('This expert offers call-only consultations.');
+    }
+    if (!data.scheduledAt && !jyotish.isOnline && !isPremiumJyotish) {
+      throw new BadRequestError('Expert is currently offline');
     }
 
     return this.jyotishRepository.createBooking({
@@ -158,15 +171,19 @@ export class JyotishService {
     // Calculate free minutes used and charges
     const freeMinutesUsed = Math.min(duration, FREE_MINUTES);
     const chargeableMinutes = Math.max(0, duration - FREE_MINUTES);
-    // TODO: Calculate amount based on jyotish rate (to be implemented)
-    const totalAmount = 0; // Placeholder
+    void chargeableMinutes; // reserved for future metered billing
+    // Preserve amount already stored when the session was paid upfront (JYOTISH_SERVICE / booking payment)
+    const totalAmountToStore =
+      booking.paid === true && typeof booking.totalAmount === 'number'
+        ? booking.totalAmount
+        : 0;
 
     const updatedBooking = await this.jyotishRepository.updateBooking(bookingId, {
       status: BookingStatus.COMPLETED,
       endedAt: new Date(),
       duration,
       freeMinutesUsed,
-      totalAmount,
+      totalAmount: totalAmountToStore,
     });
 
     if (!updatedBooking) {
@@ -221,16 +238,73 @@ export class JyotishService {
       throw new BadRequestError('You are not part of this booking');
     }
 
+    if (bookingUserId === senderId && bookingJyotishId) {
+      const hasAccess = await this.serviceAccessRepository.hasAccess(
+        senderId,
+        bookingJyotishId,
+        'chat'
+      );
+      if (!hasAccess) {
+        throw new ForbiddenError(
+          'Payment required to continue chatting. The astrologer ended this session — pay again to send messages.'
+        );
+      }
+    }
+
     const receiverId =
       bookingUserId === senderId
         ? bookingJyotishId
         : bookingUserId;
 
-    return this.jyotishRepository.createMessage({
+    const chatMessage = await this.jyotishRepository.createMessage({
       booking: bookingId as any,
       sender: senderId as any,
       receiver: receiverId as any,
       message,
+    });
+
+    if (receiverId) {
+      void this.notifyReceiverOfChatMessage(
+        receiverId,
+        senderId,
+        bookingId,
+        message
+      ).catch((err: unknown) => {
+        logger.error('notifyReceiverOfChatMessage failed', {
+          error: err instanceof Error ? err.message : err,
+          bookingId,
+          receiverId,
+        });
+      });
+    }
+
+    return chatMessage;
+  }
+
+  /** In-app + push for the other party so mobile bell / notifications list update. */
+  private async notifyReceiverOfChatMessage(
+    receiverId: string,
+    senderId: string,
+    bookingId: string,
+    message: string
+  ): Promise<void> {
+    const sender = await this.userRepository.findById(senderId);
+    const senderName =
+      (sender?.fullName && String(sender.fullName).trim()) ||
+      sender?.username ||
+      'Someone';
+    const preview =
+      message.length > 120 ? `${message.slice(0, 117)}...` : message;
+
+    await this.notificationService.createNotification(receiverId, {
+      type: NotificationType.MESSAGE,
+      title: `New message from ${senderName}`,
+      message: preview,
+      metadata: {
+        kind: 'jyotish_chat',
+        bookingId,
+        senderId,
+      },
     });
   }
 
@@ -262,7 +336,7 @@ export class JyotishService {
   }
 
   async getChatRooms(userId: string, userRole: UserRole): Promise<any[]> {
-    if (userRole === UserRole.JYOTISH) {
+    if (isConsultationExpertRole(userRole)) {
       return this.jyotishRepository.getChatRoomsForJyotish(userId);
     } else {
       return this.jyotishRepository.getChatRoomsForUser(userId);
@@ -291,10 +365,18 @@ export class JyotishService {
       throw new BadRequestError('You are not part of this booking');
     }
 
-    const otherUserId =
-      bookingUserId === userId
-        ? bookingJyotishId
-        : bookingUserId;
+    if (bookingUserId === userId && bookingJyotishId) {
+      const hasAccess = await this.serviceAccessRepository.hasAccess(
+        userId,
+        bookingJyotishId,
+        'call'
+      );
+      if (!hasAccess) {
+        throw new ForbiddenError(
+          'Payment required to start a call. The previous call session was ended — pay again to continue.'
+        );
+      }
+    }
 
     // Jitsi room name for admin/expert join link (meet.jit.si/{roomName})
     const shortId = crypto.randomBytes(4).toString('hex');
@@ -310,10 +392,17 @@ export class JyotishService {
     });
   }
 
-  async endCall(callId: string, duration: number): Promise<ICallRecord> {
+  async endCall(callId: string, userId: string, duration: number): Promise<ICallRecord> {
     const callRecord = await this.jyotishRepository.findCallRecordById(callId);
     if (!callRecord) {
       throw new NotFoundError('Call record not found');
+    }
+
+    const bookingUserId = this.getUserOrJyotishId(callRecord.user);
+    const bookingJyotishId = this.getUserOrJyotishId(callRecord.jyotish);
+
+    if (bookingUserId !== userId && bookingJyotishId !== userId) {
+      throw new BadRequestError('You are not part of this call');
     }
 
     const updatedCall = await this.jyotishRepository.updateCallRecord(callId, {
@@ -323,6 +412,14 @@ export class JyotishService {
 
     if (!updatedCall) {
       throw new NotFoundError('Call record not found');
+    }
+
+    if (bookingUserId && bookingJyotishId) {
+      await this.serviceAccessRepository.revokeAccess(
+        bookingUserId,
+        bookingJyotishId,
+        'call'
+      );
     }
 
     return updatedCall;
@@ -362,8 +459,8 @@ export class JyotishService {
 
     // Verify jyotish exists and is the current user
     const jyotish = await this.userRepository.findById(jyotishId);
-    if (!jyotish || jyotish.role !== UserRole.JYOTISH) {
-      throw new NotFoundError('Jyotish not found');
+    if (!jyotish || !isConsultationExpertRole(jyotish.role)) {
+      throw new NotFoundError('Expert not found');
     }
 
     return this.jyotishRepository.createNote({
@@ -381,11 +478,11 @@ export class JyotishService {
   ): Promise<IJyotishNote[]> {
     // Verify jyotish exists
     const jyotish = await this.userRepository.findById(jyotishId);
-    if (!jyotish || jyotish.role !== UserRole.JYOTISH) {
-      throw new NotFoundError('Jyotish not found');
+    if (!jyotish || !isConsultationExpertRole(jyotish.role)) {
+      throw new NotFoundError('Expert not found');
     }
 
-    // This method returns notes that the jyotish can read
+    // This method returns notes that the expert can read
     // (own notes + private notes from other jyotish if they have a booking)
     return this.jyotishRepository.findNotesForJyotishAboutUser(userId, jyotishId);
   }

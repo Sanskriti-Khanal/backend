@@ -6,6 +6,7 @@ import { parseStringPromise } from 'xml2js';
 import { BadRequestError } from '@errors/AppError';
 import CryptoJS from 'crypto-js';
 import env from '@config/env';
+import { normalizePemFromEnv } from '@utils/jwt.util';
 
 interface CreateOrderRequest {
   amount: number; // Amount in NPR (e.g., 1 for NPR 1.00) - will be converted to paisa internally
@@ -118,9 +119,10 @@ export class NabilService {
 
     if (certFromEnv && keyFromEnv) {
       try {
-        // Decode base64 certificates from environment variables
-        cert = Buffer.from(certFromEnv, 'base64').toString('utf-8');
-        key = Buffer.from(keyFromEnv, 'base64').toString('utf-8');
+        // Decode base64 PEM from env, then normalize newlines (fixes OpenSSL
+        // error:04800066:PEM routines::bad end line when headers/body are one line).
+        cert = normalizePemFromEnv(Buffer.from(certFromEnv, 'base64').toString('utf-8'));
+        key = normalizePemFromEnv(Buffer.from(keyFromEnv, 'base64').toString('utf-8'));
         console.log('✅ Loaded SSL certificates from environment variables');
         console.log('  Cert length:', cert.length, 'chars');
         console.log('  Key length:', key.length, 'chars');
@@ -198,8 +200,8 @@ export class NabilService {
         );
       }
 
-      cert = fs.readFileSync(foundCertPath);
-      key = fs.readFileSync(foundKeyPath);
+      cert = normalizePemFromEnv(fs.readFileSync(foundCertPath, 'utf8'));
+      key = normalizePemFromEnv(fs.readFileSync(foundKeyPath, 'utf8'));
       console.log(`✅ Loaded SSL certificates from files: ${foundCertPath}, ${foundKeyPath}`);
     }
 

@@ -669,13 +669,13 @@ class UniverseLite {
       });
     }
 
-    // Place planets into their houses using the already calculated house field
+    // Whole-sign chart: house from (planet rashi vs lagna rashi), not cached planet.house
     this.planets.forEach(planet => {
-      if (planet.house && planet.house >= 1 && planet.house <= 12) {
-        const houseIndex = planet.house - 1;
-        const label = planet.shortName || planet.id || planet.name;
-        houses[houseIndex].planets.push(label);
-      }
+      if (!planet.sign || planet.sign < 1 || planet.sign > 12) return;
+      const house = ephemeris.getHouse(planet.sign, this.ascendantSign);
+      const houseIndex = house - 1;
+      const label = planet.shortName || planet.id || planet.name;
+      houses[houseIndex].planets.push(label);
     });
 
     // Ascendant itself is always in house 1
@@ -711,18 +711,12 @@ class UniverseLite {
       });
     }
 
-    // Calculate house for each planet using Moon's sign as reference
-    // Formula: House = ((planetSign - moonSign + 12) % 12) + 1
     this.planets.forEach(planet => {
-      if (planet.sign && planet.sign >= 1 && planet.sign <= 12) {
-        let house = ((planet.sign - moonSign + 12) % 12) + 1;
-        if (house < 1) house = 1;
-        if (house > 12) house = 12;
-        
-        const houseIndex = house - 1;
-        const label = planet.shortName || planet.id || planet.name;
-        houses[houseIndex].planets.push(label);
-      }
+      if (!planet.sign || planet.sign < 1 || planet.sign > 12) return;
+      const house = ephemeris.getHouse(planet.sign, moonSign);
+      const houseIndex = house - 1;
+      const label = planet.shortName || planet.id || planet.name;
+      houses[houseIndex].planets.push(label);
     });
 
     // Moon itself is always in house 1 (as the ascendant of Chandra Kundali)
@@ -731,11 +725,8 @@ class UniverseLite {
     houses[0].planets = houses[0].planets.filter(p => p !== moonLabel);
     houses[0].planets.unshift(moonLabel);
 
-    // Also include the actual ascendant in its chandra kundali house
     if (this.ascendant && this.ascendant.sign) {
-      let ascHouse = ((this.ascendant.sign - moonSign + 12) % 12) + 1;
-      if (ascHouse < 1) ascHouse = 1;
-      if (ascHouse > 12) ascHouse = 12;
+      const ascHouse = ephemeris.getHouse(this.ascendant.sign, moonSign);
       const ascHouseIndex = ascHouse - 1;
       const ascLabel = this.ascendant.shortName || this.ascendant.id || this.ascendant.name;
       // Only add if not already in that house (to avoid duplicates)
@@ -787,18 +778,12 @@ class UniverseLite {
       });
     }
 
-    // Calculate house for each planet using planet's sign as reference
-    // Formula: House = ((planetSign - referencePlanetSign + 12) % 12) + 1
     this.planets.forEach(p => {
-      if (p.sign && p.sign >= 1 && p.sign <= 12) {
-        let house = ((p.sign - planetSign + 12) % 12) + 1;
-        if (house < 1) house = 1;
-        if (house > 12) house = 12;
-        
-        const houseIndex = house - 1;
-        const label = p.shortName || p.id || p.name;
-        houses[houseIndex].planets.push(label);
-      }
+      if (!p.sign || p.sign < 1 || p.sign > 12) return;
+      const house = ephemeris.getHouse(p.sign, planetSign);
+      const houseIndex = house - 1;
+      const label = p.shortName || p.id || p.name;
+      houses[houseIndex].planets.push(label);
     });
 
     // The reference planet itself is always in house 1 (as the ascendant)
@@ -807,11 +792,8 @@ class UniverseLite {
     houses[0].planets = houses[0].planets.filter(p => p !== planetLabel);
     houses[0].planets.unshift(planetLabel);
 
-    // Also include the actual ascendant in its planet kundali house
     if (this.ascendant && this.ascendant.sign) {
-      let ascHouse = ((this.ascendant.sign - planetSign + 12) % 12) + 1;
-      if (ascHouse < 1) ascHouse = 1;
-      if (ascHouse > 12) ascHouse = 12;
+      const ascHouse = ephemeris.getHouse(this.ascendant.sign, planetSign);
       const ascHouseIndex = ascHouse - 1;
       const ascLabel = this.ascendant.shortName || this.ascendant.id || this.ascendant.name;
       // Only add if not already in that house (to avoid duplicates)
@@ -913,13 +895,14 @@ class UniverseLite {
       });
     }
 
-    // Place planets into their Hora houses
     this.horaChart.planets.forEach(planet => {
-      if (planet.divisional && planet.divisional.house && planet.divisional.house >= 1 && planet.divisional.house <= 12) {
-        const houseIndex = planet.divisional.house - 1;
-        const label = planet.shortName || planet.id || planet.name;
-        houses[houseIndex].planets.push(label);
-      }
+      const divSign = planet.divisional && planet.divisional.sign;
+      if (!divSign || divSign < 1 || divSign > 12) return;
+      const house = ephemeris.getHouse(divSign, horaAscSign);
+      if (planet.divisional) planet.divisional.house = house;
+      const houseIndex = house - 1;
+      const label = planet.shortName || planet.id || planet.name;
+      houses[houseIndex].planets.push(label);
     });
 
     // Ascendant itself is always in house 1
@@ -954,13 +937,14 @@ class UniverseLite {
       });
     }
 
-    // Place planets into their Drekkana houses
     this.drekkanaChart.planets.forEach(planet => {
-      if (planet.divisional && planet.divisional.house && planet.divisional.house >= 1 && planet.divisional.house <= 12) {
-        const houseIndex = planet.divisional.house - 1;
-        const label = planet.shortName || planet.id || planet.name;
-        houses[houseIndex].planets.push(label);
-      }
+      const divSign = planet.divisional && planet.divisional.sign;
+      if (!divSign || divSign < 1 || divSign > 12) return;
+      const house = ephemeris.getHouse(divSign, drekkanaAscSign);
+      if (planet.divisional) planet.divisional.house = house;
+      const houseIndex = house - 1;
+      const label = planet.shortName || planet.id || planet.name;
+      houses[houseIndex].planets.push(label);
     });
 
     // Ascendant itself is always in house 1
@@ -995,13 +979,14 @@ class UniverseLite {
       });
     }
 
-    // Place planets into their Chaturthamsa houses
     this.chaturthamsaChart.planets.forEach(planet => {
-      if (planet.divisional && planet.divisional.house && planet.divisional.house >= 1 && planet.divisional.house <= 12) {
-        const houseIndex = planet.divisional.house - 1;
-        const label = planet.shortName || planet.id || planet.name;
-        houses[houseIndex].planets.push(label);
-      }
+      const divSign = planet.divisional && planet.divisional.sign;
+      if (!divSign || divSign < 1 || divSign > 12) return;
+      const house = ephemeris.getHouse(divSign, chaturthamsaAscSign);
+      if (planet.divisional) planet.divisional.house = house;
+      const houseIndex = house - 1;
+      const label = planet.shortName || planet.id || planet.name;
+      houses[houseIndex].planets.push(label);
     });
 
     // Ascendant itself is always in house 1
@@ -1036,13 +1021,14 @@ class UniverseLite {
       });
     }
 
-    // Place planets into their Saptamsa houses
     this.saptamsaChart.planets.forEach(planet => {
-      if (planet.divisional && planet.divisional.house && planet.divisional.house >= 1 && planet.divisional.house <= 12) {
-        const houseIndex = planet.divisional.house - 1;
-        const label = planet.shortName || planet.id || planet.name;
-        houses[houseIndex].planets.push(label);
-      }
+      const divSign = planet.divisional && planet.divisional.sign;
+      if (!divSign || divSign < 1 || divSign > 12) return;
+      const house = ephemeris.getHouse(divSign, saptamsaAscSign);
+      if (planet.divisional) planet.divisional.house = house;
+      const houseIndex = house - 1;
+      const label = planet.shortName || planet.id || planet.name;
+      houses[houseIndex].planets.push(label);
     });
 
     // Ascendant itself is always in house 1
@@ -1077,13 +1063,14 @@ class UniverseLite {
       });
     }
 
-    // Place planets into their Dashamsa houses
     this.dashamsaChart.planets.forEach(planet => {
-      if (planet.divisional && planet.divisional.house && planet.divisional.house >= 1 && planet.divisional.house <= 12) {
-        const houseIndex = planet.divisional.house - 1;
-        const label = planet.shortName || planet.id || planet.name;
-        houses[houseIndex].planets.push(label);
-      }
+      const divSign = planet.divisional && planet.divisional.sign;
+      if (!divSign || divSign < 1 || divSign > 12) return;
+      const house = ephemeris.getHouse(divSign, dashamsaAscSign);
+      if (planet.divisional) planet.divisional.house = house;
+      const houseIndex = house - 1;
+      const label = planet.shortName || planet.id || planet.name;
+      houses[houseIndex].planets.push(label);
     });
 
     // Ascendant itself is always in house 1
@@ -1118,13 +1105,14 @@ class UniverseLite {
       });
     }
 
-    // Place planets into their Dwadasamsa houses
     this.dwadasamsaChart.planets.forEach(planet => {
-      if (planet.divisional && planet.divisional.house && planet.divisional.house >= 1 && planet.divisional.house <= 12) {
-        const houseIndex = planet.divisional.house - 1;
-        const label = planet.shortName || planet.id || planet.name;
-        houses[houseIndex].planets.push(label);
-      }
+      const divSign = planet.divisional && planet.divisional.sign;
+      if (!divSign || divSign < 1 || divSign > 12) return;
+      const house = ephemeris.getHouse(divSign, dwadasamsaAscSign);
+      if (planet.divisional) planet.divisional.house = house;
+      const houseIndex = house - 1;
+      const label = planet.shortName || planet.id || planet.name;
+      houses[houseIndex].planets.push(label);
     });
 
     // Ascendant itself is always in house 1
@@ -1159,13 +1147,14 @@ class UniverseLite {
       });
     }
 
-    // Place planets into their Shodasamsa houses
     this.shodasamsaChart.planets.forEach(planet => {
-      if (planet.divisional && planet.divisional.house && planet.divisional.house >= 1 && planet.divisional.house <= 12) {
-        const houseIndex = planet.divisional.house - 1;
-        const label = planet.shortName || planet.id || planet.name;
-        houses[houseIndex].planets.push(label);
-      }
+      const divSign = planet.divisional && planet.divisional.sign;
+      if (!divSign || divSign < 1 || divSign > 12) return;
+      const house = ephemeris.getHouse(divSign, shodasamsaAscSign);
+      if (planet.divisional) planet.divisional.house = house;
+      const houseIndex = house - 1;
+      const label = planet.shortName || planet.id || planet.name;
+      houses[houseIndex].planets.push(label);
     });
 
     // Ascendant itself is always in house 1
@@ -1200,13 +1189,14 @@ class UniverseLite {
       });
     }
 
-    // Place planets into their Vimsamsa houses
     this.vimsamsaChart.planets.forEach(planet => {
-      if (planet.divisional && planet.divisional.house && planet.divisional.house >= 1 && planet.divisional.house <= 12) {
-        const houseIndex = planet.divisional.house - 1;
-        const label = planet.shortName || planet.id || planet.name;
-        houses[houseIndex].planets.push(label);
-      }
+      const divSign = planet.divisional && planet.divisional.sign;
+      if (!divSign || divSign < 1 || divSign > 12) return;
+      const house = ephemeris.getHouse(divSign, vimsamsaAscSign);
+      if (planet.divisional) planet.divisional.house = house;
+      const houseIndex = house - 1;
+      const label = planet.shortName || planet.id || planet.name;
+      houses[houseIndex].planets.push(label);
     });
 
     // Ascendant itself is always in house 1
@@ -1241,13 +1231,14 @@ class UniverseLite {
       });
     }
 
-    // Place planets into their Chaturvimsamsa houses
     this.chaturvimsamsaChart.planets.forEach(planet => {
-      if (planet.divisional && planet.divisional.house && planet.divisional.house >= 1 && planet.divisional.house <= 12) {
-        const houseIndex = planet.divisional.house - 1;
-        const label = planet.shortName || planet.id || planet.name;
-        houses[houseIndex].planets.push(label);
-      }
+      const divSign = planet.divisional && planet.divisional.sign;
+      if (!divSign || divSign < 1 || divSign > 12) return;
+      const house = ephemeris.getHouse(divSign, chaturvimsamsaAscSign);
+      if (planet.divisional) planet.divisional.house = house;
+      const houseIndex = house - 1;
+      const label = planet.shortName || planet.id || planet.name;
+      houses[houseIndex].planets.push(label);
     });
 
     // Ascendant itself is always in house 1
@@ -1386,6 +1377,11 @@ class UniverseLite {
         houses: this.buildChaturvimsamsaKundaliHouses(),
         ascendantSign: this.chaturvimsamsaChart ? this.chaturvimsamsaChart.ascendantSign : null
       },
+      // Build Navamsa houses before planets map so planet.navamsa.house is synced for the response
+      navamsa: this.navamsaChart ? {
+        ascendantSign: this.navamsaAscendantSign,
+        houses: this.buildNavamsaHouses()
+      } : null,
       planets: this.planets.map(p => ({
         id: p.id,
         name: p.name,
@@ -1409,10 +1405,6 @@ class UniverseLite {
           house: p.navamsa.house
         } : null
       })),
-      navamsa: this.navamsaChart ? {
-        ascendantSign: this.navamsaAscendantSign,
-        houses: this.buildNavamsaHouses()
-      } : null,
       birthDetails: {
         year: this.birthYear,
         month: this.birthMonth,
@@ -1585,15 +1577,22 @@ class UniverseLite {
       });
     }
 
-    // Add planets to their Navamsa houses
     this.planets.forEach(planet => {
-      if (planet.navamsa && planet.navamsa.house) {
-        const houseIndex = planet.navamsa.house - 1;
-        if (houses[houseIndex]) {
-          houses[houseIndex].planets.push(planet.name);
-        }
+      const ns = planet.navamsa && planet.navamsa.sign;
+      if (!ns || ns < 1 || ns > 12) return;
+      const house = ephemeris.getHouse(ns, navamsaAscSign);
+      if (planet.navamsa) planet.navamsa.house = house;
+      const houseIndex = house - 1;
+      if (houses[houseIndex]) {
+        const label = planet.shortName || planet.id || planet.name;
+        houses[houseIndex].planets.push(label);
       }
     });
+
+    // Ascendant is always house 1 in Navamsa (same as Lagna chart)
+    const ascLabel = this.ascendant.shortName || this.ascendant.id || this.ascendant.name;
+    houses[0].planets = houses[0].planets.filter(p => p !== ascLabel);
+    houses[0].planets.unshift(ascLabel);
 
     return houses;
   }

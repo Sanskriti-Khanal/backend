@@ -8,6 +8,8 @@ import {
   createUserSchema,
   updateUserSchema,
   productIdSchema,
+  createProductSchema,
+  updateProductSchema,
   healingListingIdSchema,
   healingPackageIdSchema,
   pujaListingIdSchema,
@@ -15,6 +17,9 @@ import {
   bookingIdSchema,
   roleQuerySchema,
   updateOrderStatusSchema,
+  updateOrderSessionStatusSchema,
+  astrologySavedListQuerySchema,
+  astrologyRashifalLimitQuerySchema,
 } from '@validators/admin.validator';
 import { orderIdSchema, paymentIdSchema } from '@validators/payment.validator';
 import { enquiryIdSchema } from '@validators/product-enquiry.validator';
@@ -39,8 +44,8 @@ router.delete('/users/:id', validate(userIdSchema), adminController.deleteUser);
 // Product Management
 router.get('/products', adminController.getAllProducts);
 router.get('/products/:id', validate(productIdSchema), adminController.getProductById);
-router.post('/products', adminController.createProduct);
-router.put('/products/:id', validate(productIdSchema), adminController.updateProduct);
+router.post('/products', validate(createProductSchema), adminController.createProduct);
+router.put('/products/:id', validate(updateProductSchema), adminController.updateProduct);
 router.delete('/products/:id', validate(productIdSchema), adminController.deleteProduct);
 
 // Healing Services Management
@@ -133,6 +138,11 @@ router.patch(
   validate(updateOrderStatusSchema),
   adminController.updateOrderStatus
 );
+router.patch(
+  '/orders/:id/sessions/:sessionNumber',
+  validate(updateOrderSessionStatusSchema),
+  adminController.updateOrderSessionStatus
+);
 
 router.get('/payments', adminController.getAllPayments);
 router.get('/payments/:id', validate(paymentIdSchema), adminController.getPaymentById);
@@ -142,6 +152,18 @@ router.get('/enquiries', adminController.getAllEnquiries);
 router.get('/enquiries/:id', validate(enquiryIdSchema), adminController.getEnquiryById);
 router.put('/enquiries/:id/status', validate(enquiryIdSchema), adminController.updateEnquiryStatus);
 router.delete('/enquiries/:id', validate(enquiryIdSchema), adminController.deleteEnquiry);
+
+// Astrology: saved chart inputs vs profile fields for daily rashifal
+router.get(
+  '/astrology/saved',
+  validate(astrologySavedListQuerySchema),
+  adminController.getSavedAstrologyRecords
+);
+router.get(
+  '/astrology/daily-rashifal-inputs',
+  validate(astrologyRashifalLimitQuerySchema),
+  adminController.getDailyRashifalProfileRows
+);
 
 export default router;
 

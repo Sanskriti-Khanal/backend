@@ -353,6 +353,13 @@ class GocharService {
       });
     }
 
+    const moonTransit = transitPlanets.find((p) => p.id === 'moon') || null;
+    const sunTransit = transitPlanets.find((p) => p.id === 'sun') || null;
+    const currentTithiId =
+      moonTransit && sunTransit
+        ? this.calculateTithiId(sunTransit.longitude, moonTransit.longitude)
+        : null;
+
     const kundaliTypeNames = {
       lagna: 'लग्न (Ascendant)',
       chandra: 'चन्द्र (Moon)',
@@ -405,9 +412,28 @@ class GocharService {
         planets: transitPlanets,
         houses: transitHouses
       },
+      dailyrasifalContext: {
+        moonTravelSign: moonTransit ? moonTransit.sign : null,
+        tithiId: currentTithiId
+      },
       ayanamsa: transitAyanamsa,
       julianDay: transitJdUt
     };
+  }
+
+  /**
+   * Compute current tithi id (1-30) from sidereal longitudes.
+   */
+  calculateTithiId(sunLongitude, moonLongitude) {
+    if (!Number.isFinite(sunLongitude) || !Number.isFinite(moonLongitude)) {
+      return null;
+    }
+
+    const delta = (moonLongitude - sunLongitude + 360) % 360;
+    const tithi = Math.floor(delta / 12) + 1;
+    if (tithi < 1) return 1;
+    if (tithi > 30) return 30;
+    return tithi;
   }
 
   /**

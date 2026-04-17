@@ -20,9 +20,17 @@ router.post(
           .json({ success: false, message: 'No file uploaded' });
       }
 
+      const scope = typeof req.query.scope === 'string' ? req.query.scope : '';
+      const folder =
+        scope === 'user'
+          ? 'merosathi/users'
+          : scope === 'product'
+            ? 'merosathi/products'
+            : 'merosathi/healing';
+
       const uploadStream = cloudinary.uploader.upload_stream(
         {
-          folder: 'merosathi/healing',
+          folder,
         },
         (error: any, result: any) => {
           if (error || !result) {

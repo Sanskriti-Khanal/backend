@@ -46,18 +46,24 @@ export const authenticate = (
       roleValue = String(decoded.role).toLowerCase().trim();
     }
 
-    // Get all valid enum values explicitly
-    // UserRole enum values are: 'user', 'healer', 'jyotish', 'pujari', 'pandit', 'admin'
+    // Legacy tokens issued before role rename still carry pujari / pandit
+    const legacyJwtRoleMap: Record<string, UserRole> = {
+      pujari: UserRole.JYOTISH,
+      pandit: UserRole.VAASTU,
+    };
+    if (legacyJwtRoleMap[roleValue]) {
+      roleValue = legacyJwtRoleMap[roleValue];
+    }
+
     const validRoles: UserRole[] = [
       UserRole.USER,
       UserRole.HEALER,
       UserRole.JYOTISH,
-      UserRole.PUJARI,
-      UserRole.PANDIT,
+      UserRole.PREMIUM_JYOTISH,
+      UserRole.VAASTU,
       UserRole.ADMIN,
     ];
-    
-    // Find matching role (case-insensitive comparison)
+
     const normalizedRole = validRoles.find(
       (enumRole) => enumRole.toLowerCase() === roleValue
     );

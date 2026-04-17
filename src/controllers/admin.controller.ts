@@ -1,8 +1,9 @@
 import { Request, Response, NextFunction } from 'express';
 import { AdminService } from '@services/admin.service';
 import { sendSuccess } from '@utils/response.util';
-import { OrderStatus } from '@models/Order.model';
+import { OrderSessionStatus, OrderStatus } from '@models/Order.model';
 import { EnquiryStatus } from '@models/ProductEnquiry.model';
+import { SavedAstrologyKind } from '@models/SavedAstrology.model';
 
 export class AdminController {
   private adminService: AdminService;
@@ -403,7 +404,9 @@ export class AdminController {
     next: NextFunction
   ): Promise<void> => {
     try {
-      const bookings = await this.adminService.getAllBookings();
+      const kindRaw = typeof req.query.kind === 'string' ? req.query.kind.toLowerCase() : '';
+      const kind = kindRaw === 'chat' ? ('chat' as const) : undefined;
+      const bookings = await this.adminService.getAllBookings(kind);
       sendSuccess(res, bookings);
     } catch (error) {
       next(error);
@@ -452,7 +455,21 @@ export class AdminController {
     try {
       const status = typeof req.query.status === 'string' ? req.query.status : undefined;
       const orderType = typeof req.query.orderType === 'string' ? req.query.orderType : undefined;
-      const orders = await this.adminService.getAllOrders({ status, orderType });
+      const bucketRaw = typeof req.query.bucket === 'string' ? req.query.bucket.toLowerCase() : '';
+      const bucket =
+        bucketRaw === 'product' || bucketRaw === 'service' ? (bucketRaw as 'product' | 'service') : undefined;
+      const segRaw =
+        typeof req.query.bookingSegment === 'string' ? req.query.bookingSegment.toLowerCase() : '';
+      const bookingSegment =
+        segRaw === 'healing' || segRaw === 'puja' || segRaw === 'vaastu'
+          ? (segRaw as 'healing' | 'puja' | 'vaastu')
+          : undefined;
+      const orders = await this.adminService.getAllOrders({
+        status,
+        orderType,
+        bucket,
+        bookingSegment,
+      });
       sendSuccess(res, orders);
     } catch (error) {
       next(error);
@@ -472,6 +489,24 @@ export class AdminController {
     try {
       const updated = await this.adminService.updateOrderStatus(req.params.id, req.body.status as OrderStatus);
       sendSuccess(res, updated, 'Order updated successfully');
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  updateOrderSessionStatus = async (
+    req: Request,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> => {
+    try {
+      const sessionNumber = Number(req.params.sessionNumber);
+      const updated = await this.adminService.updateOrderSessionStatus(
+        req.params.id,
+        sessionNumber,
+        req.body.status as OrderSessionStatus
+      );
+      sendSuccess(res, updated, 'Session status updated successfully');
     } catch (error) {
       next(error);
     }
@@ -532,6 +567,37 @@ export class AdminController {
     try {
       await this.adminService.deleteEnquiry(req.params.id);
       sendSuccess(res, null, 'Enquiry deleted successfully');
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  /** Saved chart requests: kind=kundali (Create Kundali) | milan (Kundali Milan) */
+  getSavedAstrologyRecords = async (
+    req: Request,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> => {
+    try {
+      const kind = req.query.kind as SavedAstrologyKind;
+      const limit = req.query.limit ? Number(req.query.limit) : undefined;
+      const rows = await this.adminService.getSavedAstrologyForAdmin(kind, limit);
+      sendSuccess(res, rows);
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  /** User profile DOB / time / place used for daily rashifal & onboarding */
+  getDailyRashifalProfileRows = async (
+    req: Request,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> => {
+    try {
+      const limit = req.query.limit ? Number(req.query.limit) : undefined;
+      const rows = await this.adminService.getDailyRashifalProfileRows(limit);
+      sendSuccess(res, rows);
     } catch (error) {
       next(error);
     }

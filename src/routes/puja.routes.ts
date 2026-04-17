@@ -44,6 +44,12 @@ router.get(
   pujaController.getListingWithReviews
 );
 router.get(
+  '/listings/:id/review-eligibility',
+  authenticate,
+  validate(listingIdSchema),
+  pujaController.getReviewEligibility
+);
+router.get(
   '/listings/:id/available-pujaris',
   validate(listingIdSchema),
   pujaController.getAvailablePujarisForListing
@@ -66,7 +72,12 @@ router.get('/packages/:id', validate(packageIdSchema), pujaController.getPackage
 router.post(
   '/listings',
   authenticate,
-  authorize(UserRole.PUJARI, UserRole.ADMIN),
+  authorize(
+    UserRole.JYOTISH,
+    UserRole.PREMIUM_JYOTISH,
+    UserRole.VAASTU,
+    UserRole.ADMIN
+  ),
   validate(createListingSchema),
   pujaController.createListing
 );
@@ -92,7 +103,12 @@ router.get(
 router.post(
   '/packages',
   authenticate,
-  authorize(UserRole.PUJARI, UserRole.ADMIN),
+  authorize(
+    UserRole.JYOTISH,
+    UserRole.PREMIUM_JYOTISH,
+    UserRole.VAASTU,
+    UserRole.ADMIN
+  ),
   validate(createPackageSchema),
   pujaController.createPackage
 );

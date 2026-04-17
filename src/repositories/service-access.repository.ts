@@ -45,4 +45,18 @@ export class ServiceAccessRepository {
       serviceProvider: serviceProviderId,
     }).sort({ createdAt: -1 });
   }
+
+  /** Remove paid session unlock so customer must pay again. */
+  async revokeAccess(
+    userId: string,
+    serviceProviderId: string,
+    serviceType: 'chat' | 'call'
+  ): Promise<boolean> {
+    const r = await ServiceAccessModel.deleteOne({
+      user: userId,
+      serviceProvider: serviceProviderId,
+      serviceType,
+    });
+    return r.deletedCount > 0;
+  }
 }

@@ -47,6 +47,12 @@ router.get(
   validate(listingIdSchema),
   healingController.getListingWithReviews
 );
+router.get(
+  '/listings/:id/review-eligibility',
+  authenticate,
+  validate(listingIdSchema),
+  healingController.getReviewEligibility
+);
 
 // Public routes - Packages
 router.get('/packages', healingController.getAllPackages);

@@ -48,8 +48,18 @@ export class UserController {
     }
   };
 
+  refresh = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const result = await this.userService.refreshTokens(req.body.refreshToken);
+      sendSuccess(res, result, 'Token refreshed');
+    } catch (error) {
+      next(error);
+    }
+  };
+
   logout = async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
     try {
+      await this.userService.revokeRefreshTokensForUser(req.user!.id);
       const authHeader = req.headers.authorization;
       if (authHeader && authHeader.startsWith('Bearer ')) {
         const token = authHeader.substring(7);

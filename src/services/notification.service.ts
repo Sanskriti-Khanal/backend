@@ -167,17 +167,23 @@ export class NotificationService {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    // Get all active users with DOB
+    // Only users who completed kundali onboarding should get daily horoscope notifications.
     const users = await this.userRepository.findAll();
-    const usersWithDob = users.filter(
-      (u) => u.dob && u.isActive && u.role === UserRole.USER
+    const eligibleUsers = users.filter(
+      (u) =>
+        u.isActive &&
+        u.role === UserRole.USER &&
+        u.kundaliCompleted === true &&
+        Boolean(u.dob) &&
+        Boolean(u.birthTime) &&
+        Boolean(u.birthPlace),
     );
 
     let sent = 0;
     let failed = 0;
     const notifications: Partial<INotification>[] = [];
 
-    for (const user of usersWithDob) {
+    for (const user of eligibleUsers) {
       try {
         // Check if user has opted in for daily forecasts
         const shouldSend = await this.shouldSendNotification(

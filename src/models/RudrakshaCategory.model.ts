@@ -116,7 +116,6 @@ const rudrakshaCategorySchema = new Schema<IRudrakshaCategory>(
 );
 
 // Indexes
-rudrakshaCategorySchema.index({ slug: 1 }, { unique: true });
 rudrakshaCategorySchema.index({ categoryType: 1 });
 rudrakshaCategorySchema.index({ mukhiCount: 1 });
 rudrakshaCategorySchema.index({ isActive: 1 });

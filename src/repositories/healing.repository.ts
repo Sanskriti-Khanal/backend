@@ -11,6 +11,10 @@ import {
   HealingReviewModel,
   IHealingReview,
 } from '@models/HealingReview.model';
+import {
+  HealingPackageReviewModel,
+  IHealingPackageReview,
+} from '@models/HealingPackageReview.model';
 
 export class HealingRepository {
   // Listing methods
@@ -179,6 +183,67 @@ export class HealingRepository {
 
   async deleteReview(reviewId: string): Promise<boolean> {
     const result = await HealingReviewModel.findByIdAndDelete(reviewId);
+    return !!result;
+  }
+
+  // Package review methods
+  async createPackageReview(
+    reviewData: Partial<IHealingPackageReview>
+  ): Promise<IHealingPackageReview> {
+    return HealingPackageReviewModel.create(reviewData);
+  }
+
+  async findPackageReviewById(reviewId: string): Promise<IHealingPackageReview | null> {
+    return HealingPackageReviewModel.findById(reviewId);
+  }
+
+  async findPackageReviewByPackageAndUser(
+    packageId: string,
+    userId: string
+  ): Promise<IHealingPackageReview | null> {
+    return HealingPackageReviewModel.findOne({ package: packageId, user: userId });
+  }
+
+  async findReviewsByPackage(packageId: string): Promise<IHealingPackageReview[]> {
+    return HealingPackageReviewModel.find({ package: packageId })
+      .populate('user', 'fullName username')
+      .sort({ createdAt: -1 });
+  }
+
+  async getPackageRatingStats(packageId: string): Promise<{
+    averageRating: number;
+    totalReviews: number;
+  }> {
+    const stats = await HealingPackageReviewModel.aggregate([
+      { $match: { package: new mongoose.Types.ObjectId(packageId) } },
+      {
+        $group: {
+          _id: null,
+          averageRating: { $avg: '$rating' },
+          totalReviews: { $sum: 1 },
+        },
+      },
+    ]);
+
+    if (stats.length === 0) {
+      return { averageRating: 0, totalReviews: 0 };
+    }
+
+    return {
+      averageRating: Math.round(stats[0].averageRating * 10) / 10,
+      totalReviews: stats[0].totalReviews,
+    };
+  }
+
+  async updatePackageReview(
+    reviewId: string,
+    data: Partial<IHealingPackageReview>
+  ): Promise<IHealingPackageReview | null> {
+    return HealingPackageReviewModel.findByIdAndUpdate(reviewId, data, { new: true });
+  }
+
+  async deletePackageReview(reviewId: string): Promise<boolean> {
+    const result = await HealingPackageReviewModel.findByIdAndDelete(reviewId);
     return !!result;
   }
 }

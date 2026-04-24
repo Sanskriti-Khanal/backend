@@ -168,6 +168,19 @@ export class HealingController {
     }
   };
 
+  getPackageWithReviews = async (
+    req: Request,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> => {
+    try {
+      const result = await this.healingService.getPackageWithReviews(req.params.id);
+      sendSuccess(res, result);
+    } catch (error) {
+      next(error);
+    }
+  };
+
   getAllPackages = async (
     req: Request,
     res: Response,
@@ -279,6 +292,52 @@ export class HealingController {
     }
   };
 
+  createPackageReview = async (
+    req: AuthRequest,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> => {
+    try {
+      const review = await this.healingService.createPackageReview(
+        req.params.id,
+        req.user!.id,
+        req.body
+      );
+      sendSuccess(res, review, 'Package review created successfully', 201);
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  getPackageReviews = async (
+    req: Request,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> => {
+    try {
+      const reviews = await this.healingService.getPackageReviews(req.params.id);
+      sendSuccess(res, reviews);
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  getPackageReviewEligibility = async (
+    req: AuthRequest,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> => {
+    try {
+      const result = await this.healingService.getPackageReviewEligibility(
+        req.params.id,
+        req.user!.id
+      );
+      sendSuccess(res, result);
+    } catch (error) {
+      next(error);
+    }
+  };
+
   updateReview = async (
     req: AuthRequest,
     res: Response,
@@ -304,6 +363,83 @@ export class HealingController {
     try {
       await this.healingService.deleteReview(req.params.reviewId, req.user!.id);
       sendSuccess(res, null, 'Review deleted successfully');
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  updatePackageReview = async (
+    req: AuthRequest,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> => {
+    try {
+      const review = await this.healingService.updatePackageReview(
+        req.params.reviewId,
+        req.user!.id,
+        req.body
+      );
+      sendSuccess(res, review, 'Package review updated successfully');
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  deletePackageReview = async (
+    req: AuthRequest,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> => {
+    try {
+      await this.healingService.deletePackageReview(req.params.reviewId, req.user!.id);
+      sendSuccess(res, null, 'Package review deleted successfully');
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  getSessionOccupiedDates = async (
+    req: Request,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> => {
+    try {
+      const sessionId = String(req.query.sessionId || '').trim();
+      const result = await this.healingService.getSessionOccupiedDates(sessionId);
+      sendSuccess(res, result);
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  initHealingSessionBooking = async (
+    req: AuthRequest,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> => {
+    try {
+      const result = await this.healingService.initHealingSessionBooking(
+        req.user!.id,
+        req.body
+      );
+      sendSuccess(res, result, 'Booking created', 201);
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  verifyHealingSessionBooking = async (
+    req: AuthRequest,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> => {
+    try {
+      const bookingId = req.query.bookingId as string;
+      const result = await this.healingService.verifyHealingSessionBooking(
+        req.user!.id,
+        bookingId
+      );
+      sendSuccess(res, result);
     } catch (error) {
       next(error);
     }

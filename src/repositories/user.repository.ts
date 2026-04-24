@@ -31,6 +31,14 @@ export class UserRepository {
     );
   }
 
+  async clearOTP(phone: string): Promise<IUser | null> {
+    return UserModel.findOneAndUpdate(
+      { phone },
+      { $unset: { otp: 1, otpExpiry: 1 } },
+      { new: true }
+    );
+  }
+
   async verifyPhone(phone: string): Promise<IUser | null> {
     // Only mark phone verified; do NOT clear OTP here so forgot-password flow
     // can still call reset-password with the same OTP. OTP is cleared in updatePassword.
@@ -101,9 +109,10 @@ export class UserRepository {
   async updatePassword(phone: string, hashedPassword: string): Promise<IUser | null> {
     return UserModel.findOneAndUpdate(
       { phone },
-      { 
-        password: hashedPassword,
-        $unset: { otp: 1, otpExpiry: 1 }
+      {
+        $set: { password: hashedPassword },
+        $unset: { otp: 1, otpExpiry: 1 },
+        $inc: { tokenVersion: 1 },
       },
       { new: true }
     );
@@ -116,9 +125,41 @@ export class UserRepository {
   async updatePasswordById(id: string, hashedPassword: string): Promise<IUser | null> {
     return UserModel.findByIdAndUpdate(
       id,
-      { password: hashedPassword },
+      { $set: { password: hashedPassword }, $inc: { tokenVersion: 1 } },
       { new: true }
     );
+  }
+
+  /** Users eligible for personalized daily Rashifal (new astro profile or legacy kundali). */
+  async findUsersEligibleForDailyRashifal(): Promise<IUser[]> {
+    return UserModel.find({
+      isActive: true,
+      role: UserRole.USER,
+      $or: [
+        {
+          profileCompleted: true,
+          'astroDetails.dateOfBirth': { $exists: true, $ne: null },
+          'astroDetails.timeOfBirth': { $exists: true, $nin: [null, ''] },
+          'astroDetails.placeOfBirth': { $exists: true, $nin: [null, ''] },
+        },
+        {
+          kundaliCompleted: true,
+          dob: { $exists: true, $ne: null },
+          birthTime: { $exists: true, $nin: [null, ''] },
+          birthPlace: { $exists: true, $nin: [null, ''] },
+        },
+      ],
+    }).exec();
+  }
+
+  /** End users without a completed astrology profile (optional reminder audience). */
+  async findUsersNeedingAstroProfileReminder(): Promise<IUser[]> {
+    return UserModel.find({
+      isActive: true,
+      role: UserRole.USER,
+      profileCompleted: { $ne: true },
+      kundaliCompleted: { $ne: true },
+    }).exec();
   }
 }
 

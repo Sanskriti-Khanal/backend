@@ -6,9 +6,12 @@ import { normalizePemFromEnv } from '@utils/jwt.util';
 import { parseExpiresInToMs } from '@utils/token-expiry.util';
 import { UserRepository } from '@repositories/user.repository';
 import { OTPService } from './otp.service';
+import { OtpAttemptTrackerService } from './otp-attempt-tracker.service';
+import { PasswordSetTokenService } from './password-set-token.service';
 import { Types } from 'mongoose';
-import { UserModel, IUser } from '@models/User.model';
+import { UserModel, IUser, IAstroDetails } from '@models/User.model';
 import { RefreshTokenModel } from '@models/RefreshToken.model';
+import { ConsumedRefreshTokenModel } from '@models/ConsumedRefreshToken.model';
 import { UserRole, isConsultationExpertRole } from '@types';
 import {
   ConflictError,
@@ -26,10 +29,14 @@ import {
 export class UserService {
   private userRepository: UserRepository;
   private otpService: OTPService;
+  private otpAttemptTracker: OtpAttemptTrackerService;
+  private passwordSetTokenService: PasswordSetTokenService;
 
   constructor() {
     this.userRepository = new UserRepository();
     this.otpService = new OTPService();
+    this.otpAttemptTracker = new OtpAttemptTrackerService();
+    this.passwordSetTokenService = new PasswordSetTokenService();
   }
 
   async registerUser(data: {
@@ -51,6 +58,7 @@ export class UserService {
     if (existingPhone) {
       throw new ConflictError('Phone number already registered');
     }
+    this.assertCanRequestOtp(phone);
 
     // Use provided username or generate from fullName + phone for uniqueness
     let finalUsername = data.username?.trim().toLowerCase();
@@ -99,6 +107,7 @@ export class UserService {
     const otpExpiry = this.otpService.getOTPExpiry();
     await this.userRepository.updateOTP(phone, otp, otpExpiry);
     await this.otpService.sendOTP(phone, otp);
+    this.otpAttemptTracker.recordOtpSent(phone);
 
     return {
       user,
@@ -120,16 +129,21 @@ export class UserService {
       throw new NotFoundError('User not found');
     }
     const phoneKey = user.phone!;
+    this.assertCanRequestOtp(phoneKey);
 
     const otp = this.otpService.generateOTP();
     const otpExpiry = this.otpService.getOTPExpiry();
     await this.userRepository.updateOTP(phoneKey, otp, otpExpiry);
     await this.otpService.sendOTP(normalized, otp);
+    this.otpAttemptTracker.recordOtpSent(phoneKey);
 
     return { message: 'OTP sent to your phone number' };
   }
 
-  async verifyOTP(phone: string, otp: string): Promise<{ user: IUser; requiresPassword: boolean }> {
+  async verifyOTP(
+    phone: string,
+    otp: string
+  ): Promise<{ user: IUser; requiresPassword: boolean; passwordSetToken: string }> {
     const normalized = normalizePhoneToE164(phone);
     if (normalized.length < 11) {
       throw new BadRequestError('Phone must include country code (e.g. 9779812345678, 14155551234)');
@@ -143,6 +157,26 @@ export class UserService {
       throw new NotFoundError('User not found');
     }
     const phoneKey = user.phone!;
+    if (!this.otpAttemptTracker.canVerifyOtp(phoneKey).allowed) {
+      await this.userRepository.clearOTP(phoneKey);
+      throw new BadRequestError('Maximum OTP verification attempts exceeded. Please request a new OTP');
+    }
+
+    const verifiedByProvider = await this.otpService.verifyOTP(normalized, otp);
+    if (verifiedByProvider === false) {
+      await this.onFailedOtpVerification(phoneKey);
+    }
+    if (verifiedByProvider === true) {
+      this.otpAttemptTracker.clearVerifyFailures(phoneKey);
+      const verifiedUser = await this.userRepository.verifyPhone(phoneKey);
+      if (!verifiedUser) {
+        throw new NotFoundError('User not found');
+      }
+      const passwordSetToken = await this.passwordSetTokenService.issueForUserId(
+        String(verifiedUser._id)
+      );
+      return { user: verifiedUser, requiresPassword: true, passwordSetToken };
+    }
 
     if (!user.otp || !user.otpExpiry) {
       throw new BadRequestError('OTP not found. Please request a new OTP');
@@ -157,8 +191,9 @@ export class UserService {
     // In development, optional bypass so you can use a fixed code (e.g. 1234) instead of copying from terminal
     const devBypass = env.NODE_ENV === 'development' && env.DEV_OTP_BYPASS && otpTrimmed === env.DEV_OTP_BYPASS.trim();
     if (!devBypass && storedOtp !== otpTrimmed) {
-      throw new UnauthorizedError('Invalid OTP');
+      await this.onFailedOtpVerification(phoneKey);
     }
+    this.otpAttemptTracker.clearVerifyFailures(phoneKey);
 
     // Verify phone (use stored key for backward compat with 10-digit Nepal)
     const verifiedUser = await this.userRepository.verifyPhone(phoneKey);
@@ -166,19 +201,18 @@ export class UserService {
       throw new NotFoundError('User not found');
     }
 
-    // For new registrations, always require password to be set
-    // We'll check if user was just created (within last 5 minutes) or if password needs to be set
-    const isNewUser = verifiedUser.createdAt && 
-      (Date.now() - verifiedUser.createdAt.getTime()) < 5 * 60 * 1000; // 5 minutes
-
-    return { user: verifiedUser, requiresPassword: true }; // Always require password for new registrations
+    const passwordSetToken = await this.passwordSetTokenService.issueForUserId(
+      String(verifiedUser._id)
+    );
+    return { user: verifiedUser, requiresPassword: true, passwordSetToken };
   }
 
   async login(
     username: string,
     password: string,
-    rememberMe = false
-  ): Promise<{ user: IUser; accessToken: string; refreshToken?: string; token: string }> {
+    rememberMe = false,
+    deviceInfo?: string
+  ): Promise<{ user: IUser; accessToken: string; refreshToken: string; token: string }> {
     // Support login by phone number (with or without country code), username, or full name
     const digitsOnly = username.replace(/\D/g, '');
     const isPhoneNumber = digitsOnly.length >= 10 && /^[0-9]+$/.test(digitsOnly);
@@ -215,29 +249,33 @@ export class UserService {
       throw new UnauthorizedError('Account is deactivated');
     }
 
-    const accessExpires = rememberMe ? env.JWT_ACCESS_EXPIRE : env.JWT_SESSION_EXPIRE;
-    const accessToken = this.generateAccessToken(user, accessExpires);
-
-    let refreshToken: string | undefined;
-    if (rememberMe) {
-      await RefreshTokenModel.deleteMany({ userId: user._id });
-      refreshToken = await this.createRefreshTokenForUser(user._id);
-    }
+    const accessToken = this.generateAccessToken(user, env.JWT_ACCESS_EXPIRE);
+    const refreshToken = await this.createRefreshTokenForUser(user._id, {
+      rememberMe,
+      deviceInfo,
+      tokenVersionAtIssue: (user as any).tokenVersion ?? 0,
+    });
 
     return { user, accessToken, refreshToken, token: accessToken };
   }
 
   /**
    * Exchange a valid refresh token for a new access token and rotated refresh token.
+   * Detects refresh-token reuse (replay after rotation) and revokes all sessions for that user.
    */
   async refreshTokens(plainRefreshToken: string): Promise<{
     accessToken: string;
     refreshToken: string;
     token: string;
+    rememberMe: boolean;
   }> {
     const tokenHash = crypto.createHash('sha256').update(plainRefreshToken).digest('hex');
     const doc = await RefreshTokenModel.findOne({ tokenHash });
     if (!doc || doc.expiresAt.getTime() <= Date.now()) {
+      const replay = await ConsumedRefreshTokenModel.findOne({ tokenHash });
+      if (replay) {
+        await this.revokeAllSessionsForUserId(replay.userId.toString());
+      }
       throw new UnauthorizedError('Invalid or expired refresh token');
     }
 
@@ -247,15 +285,47 @@ export class UserService {
       throw new UnauthorizedError('Invalid or expired refresh token');
     }
 
+    const dbTv = (user as any).tokenVersion ?? 0;
+    if (doc.tokenVersionAtIssue !== dbTv) {
+      await RefreshTokenModel.deleteOne({ _id: doc._id });
+      throw new UnauthorizedError('Invalid or expired refresh token');
+    }
+
+    const consumedTtl = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000);
+    await ConsumedRefreshTokenModel.create({
+      tokenHash,
+      userId: doc.userId,
+      expiresAt: consumedTtl,
+    }).catch(() => {
+      /* duplicate hash — ignore */
+    });
+
     await RefreshTokenModel.deleteOne({ _id: doc._id });
-    const newRefresh = await this.createRefreshTokenForUser(user._id);
+
+    const newRefresh = await this.createRefreshTokenForUser(user._id, {
+      rememberMe: doc.rememberMe,
+      deviceInfo: doc.deviceInfo,
+      familyId: doc.familyId,
+      tokenVersionAtIssue: dbTv,
+    });
     const accessToken = this.generateAccessToken(user, env.JWT_ACCESS_EXPIRE);
 
-    return { accessToken, refreshToken: newRefresh, token: accessToken };
+    return {
+      accessToken,
+      refreshToken: newRefresh,
+      token: accessToken,
+      rememberMe: doc.rememberMe,
+    };
   }
 
   async revokeRefreshTokensForUser(userId: string): Promise<void> {
-    await RefreshTokenModel.deleteMany({ userId });
+    await this.revokeAllSessionsForUserId(userId);
+  }
+
+  private async revokeAllSessionsForUserId(userId: string): Promise<void> {
+    const uid = new Types.ObjectId(userId);
+    await RefreshTokenModel.deleteMany({ userId: uid });
+    await ConsumedRefreshTokenModel.deleteMany({ userId: uid });
   }
 
   async getProfile(userId: string): Promise<IUser> {
@@ -311,6 +381,67 @@ export class UserService {
     return updatedUser;
   }
 
+  /**
+   * Save birth details for personalized Rashifal / notifications.
+   * Syncs legacy `dob` / `birthTime` / `birthPlace` / `kundaliCompleted` for existing features.
+   */
+  async saveAstroDetails(
+    userId: string,
+    body: {
+      dateOfBirth: string;
+      timeOfBirth: string;
+      placeOfBirth: string;
+      gender?: 'male' | 'female' | 'other' | 'prefer_not_to_say';
+    }
+  ): Promise<IUser> {
+    const user = await this.userRepository.findById(userId);
+    if (!user) {
+      throw new NotFoundError('User not found');
+    }
+
+    const dob = new Date(body.dateOfBirth);
+    if (Number.isNaN(dob.getTime())) {
+      throw new BadRequestError('Invalid date of birth');
+    }
+    const timeOfBirth = body.timeOfBirth.trim();
+    const placeOfBirth = body.placeOfBirth.trim();
+    if (!timeOfBirth) {
+      throw new BadRequestError('Time of birth is required');
+    }
+    if (!placeOfBirth) {
+      throw new BadRequestError('Place of birth is required');
+    }
+
+    const allowed: Array<NonNullable<IAstroDetails['gender']>> = [
+      'male',
+      'female',
+      'other',
+      'prefer_not_to_say',
+    ];
+    const g = body.gender?.toLowerCase() as IAstroDetails['gender'] | undefined;
+    const gender = g && allowed.includes(g as NonNullable<IAstroDetails['gender']>) ? g : undefined;
+
+    const astroDetails: IAstroDetails = {
+      dateOfBirth: dob,
+      timeOfBirth,
+      placeOfBirth,
+      ...(gender ? { gender } : {}),
+    };
+
+    const updatedUser = await this.userRepository.update(userId, {
+      astroDetails,
+      profileCompleted: true,
+      dob,
+      birthTime: timeOfBirth,
+      birthPlace: placeOfBirth,
+      kundaliCompleted: true,
+    });
+    if (!updatedUser) {
+      throw new NotFoundError('User not found');
+    }
+    return updatedUser;
+  }
+
   async changePassword(
     userId: string,
     currentPassword: string,
@@ -326,6 +457,7 @@ export class UserService {
     }
     const hashedPassword = await bcrypt.hash(newPassword, 10);
     await this.userRepository.updatePasswordById(userId, hashedPassword);
+    await this.revokeAllSessionsForUserId(userId);
     return { message: 'Password changed successfully' };
   }
 
@@ -360,7 +492,34 @@ export class UserService {
     return updatedUser;
   }
 
-  async setPassword(phone: string, password: string): Promise<{ message: string }> {
+  async setPassword(
+    phone: string | undefined,
+    password: string,
+    passwordSetToken?: string
+  ): Promise<{ message: string }> {
+    const token = passwordSetToken?.trim();
+    if (token) {
+      const userId = await this.passwordSetTokenService.verifyAndConsume(token);
+      const user = await this.userRepository.findById(userId);
+      if (!user) {
+        throw new NotFoundError('User not found');
+      }
+      if (!user.isPhoneVerified) {
+        throw new BadRequestError('Phone number must be verified before setting password');
+      }
+      const phoneKey = user.phone!;
+      const hashedPassword = await bcrypt.hash(password, 10);
+      const updated = await this.userRepository.updatePassword(phoneKey, hashedPassword);
+      if (updated?._id) {
+        await this.revokeAllSessionsForUserId(String(updated._id));
+      }
+      return { message: 'Password set successfully' };
+    }
+
+    if (!phone) {
+      throw new BadRequestError('Phone is required when passwordSetToken is not provided');
+    }
+
     const normalized = normalizePhoneToE164(phone);
     if (normalized.length < 11) {
       throw new BadRequestError('Phone must include country code (e.g. 9779812345678, 14155551234)');
@@ -382,8 +541,11 @@ export class UserService {
     // Hash the new password
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Update password
-    await this.userRepository.updatePassword(phoneKey, hashedPassword);
+    // Update password (+ tokenVersion bump in repository)
+    const updated = await this.userRepository.updatePassword(phoneKey, hashedPassword);
+    if (updated?._id) {
+      await this.revokeAllSessionsForUserId(String(updated._id));
+    }
 
     return { message: 'Password set successfully' };
   }
@@ -402,27 +564,41 @@ export class UserService {
       throw new NotFoundError('User not found');
     }
     const phoneKey = user.phone!;
-
-    if (!user.otp || !user.otpExpiry) {
-      throw new BadRequestError('OTP not found. Please request a new OTP');
+    if (!this.otpAttemptTracker.canVerifyOtp(phoneKey).allowed) {
+      await this.userRepository.clearOTP(phoneKey);
+      throw new BadRequestError('Maximum OTP verification attempts exceeded. Please request a new OTP');
     }
 
-    if (isOTPExpired(user.otpExpiry)) {
-      throw new BadRequestError('OTP expired. Please request a new OTP');
+    const verifiedByProvider = await this.otpService.verifyOTP(normalized, otp);
+    if (verifiedByProvider === false) {
+      await this.onFailedOtpVerification(phoneKey);
     }
+    if (verifiedByProvider !== true) {
+      if (!user.otp || !user.otpExpiry) {
+        throw new BadRequestError('OTP not found. Please request a new OTP');
+      }
 
-    const otpTrimmed = normalizeOTP(otp);
-    const storedOtp = normalizeOTP(String(user.otp));
-    const devBypass = env.NODE_ENV === 'development' && env.DEV_OTP_BYPASS && otpTrimmed === env.DEV_OTP_BYPASS.trim();
-    if (!devBypass && storedOtp !== otpTrimmed) {
-      throw new UnauthorizedError('Invalid OTP');
+      if (isOTPExpired(user.otpExpiry)) {
+        throw new BadRequestError('OTP expired. Please request a new OTP');
+      }
+
+      const otpTrimmed = normalizeOTP(otp);
+      const storedOtp = normalizeOTP(String(user.otp));
+      const devBypass = env.NODE_ENV === 'development' && env.DEV_OTP_BYPASS && otpTrimmed === env.DEV_OTP_BYPASS.trim();
+      if (!devBypass && storedOtp !== otpTrimmed) {
+        await this.onFailedOtpVerification(phoneKey);
+      }
     }
+    this.otpAttemptTracker.clearVerifyFailures(phoneKey);
 
     // Hash the new password
     const hashedPassword = await bcrypt.hash(newPassword, 10);
 
     // Update password and clear OTP (use stored key for backward compat)
-    await this.userRepository.updatePassword(phoneKey, hashedPassword);
+    const updated = await this.userRepository.updatePassword(phoneKey, hashedPassword);
+    if (updated?._id) {
+      await this.revokeAllSessionsForUserId(String(updated._id));
+    }
 
     return { message: 'Password reset successfully' };
   }
@@ -498,25 +674,59 @@ export class UserService {
   }
 
   private generateAccessToken(user: IUser, expiresIn: string): string {
+    const tv = (user as any).tokenVersion ?? 0;
     const payload = {
       id: user._id.toString(),
       role: user.role,
       phone: user.phone,
+      tv,
     };
     const privateKey = normalizePemFromEnv(env.JWT_PRIVATE_KEY);
     return jwt.sign(payload, privateKey, { algorithm: 'RS256', expiresIn } as SignOptions);
   }
 
-  private async createRefreshTokenForUser(userId: Types.ObjectId | string): Promise<string> {
+  private async createRefreshTokenForUser(
+    userId: Types.ObjectId | string,
+    opts: {
+      rememberMe: boolean;
+      deviceInfo?: string;
+      familyId?: Types.ObjectId;
+      tokenVersionAtIssue: number;
+    }
+  ): Promise<string> {
     const plain = crypto.randomBytes(32).toString('hex');
     const tokenHash = crypto.createHash('sha256').update(plain).digest('hex');
-    const expiresAt = new Date(Date.now() + parseExpiresInToMs(env.JWT_REFRESH_EXPIRE));
+    const expStr = opts.rememberMe ? env.JWT_REFRESH_EXPIRE_REMEMBER : env.JWT_REFRESH_EXPIRE_SESSION;
+    const expiresAt = new Date(Date.now() + parseExpiresInToMs(expStr));
+    const familyId = opts.familyId ?? new Types.ObjectId();
     await RefreshTokenModel.create({
       userId,
       tokenHash,
       expiresAt,
+      familyId,
+      rememberMe: opts.rememberMe,
+      tokenVersionAtIssue: opts.tokenVersionAtIssue,
+      deviceInfo: opts.deviceInfo?.slice(0, 512),
     });
     return plain;
+  }
+
+  private assertCanRequestOtp(phoneKey: string): void {
+    const gate = this.otpAttemptTracker.canRequestOtp(phoneKey);
+    if (!gate.allowed) {
+      throw new BadRequestError(
+        `OTP request limit reached. Please try again in ${gate.retryAfterSec} seconds`
+      );
+    }
+  }
+
+  private async onFailedOtpVerification(phoneKey: string): Promise<never> {
+    const result = this.otpAttemptTracker.recordVerifyFailure(phoneKey);
+    if (result.exhausted) {
+      await this.userRepository.clearOTP(phoneKey);
+      throw new BadRequestError('Maximum OTP verification attempts exceeded. Please request a new OTP');
+    }
+    throw new UnauthorizedError(`Invalid OTP. ${result.attemptsLeft} attempt(s) remaining`);
   }
 }
 

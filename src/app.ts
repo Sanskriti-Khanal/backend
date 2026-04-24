@@ -2,6 +2,7 @@ import express from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
 import compression from 'compression';
+import cookieParser from 'cookie-parser';
 import path from 'path';
 import fs from 'fs';
 import connectDatabase from '@config/database';
@@ -9,6 +10,7 @@ import env from '@config/env';
 import { errorHandler, notFoundHandler } from '@middleware/error.middleware';
 import { PaymentController } from '@controllers/payment.controller';
 import userRoutes from '@routes/user.routes';
+import authRoutes from '@routes/auth.routes';
 import productRoutes from '@routes/product.routes';
 import healingRoutes from '@routes/healing.routes';
 import pujaRoutes from '@routes/puja.routes';
@@ -23,10 +25,14 @@ import transactionLogRoutes from '@routes/transaction-log.routes';
 import healthRoutes from '@routes/health.routes';
 import productEnquiryRoutes from '@routes/product-enquiry.routes';
 import astrologyRoutes from '@routes/astrology.routes';
+import jitsiRoutes from '@routes/jitsi.routes';
+import cronRoutes from '@routes/cron.routes';
 import { apiLimiter } from '@middleware/rateLimit.middleware';
 import { sanitizeInput } from '@middleware/sanitize.middleware';
 import { validate } from '@middleware/validation.middleware';
-import { khaltiCallbackSchema } from '@validators/payment.validator';
+import { authenticate } from '@middleware/auth.middleware';
+import type { AuthRequest } from '@middleware/auth.middleware';
+import { khaltiCallbackSchema, verifyUnifiedTransactionQuerySchema } from '@validators/payment.validator';
 import logger from '@utils/logger';
 import { initSentry, sentryRequestHandler, sentryErrorHandler } from '@config/sentry';
 
@@ -102,6 +108,7 @@ app.use(compression());
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
 app.use(express.json({ limit: '10mb' }));
+app.use(cookieParser());
 
 // Input sanitization - apply after body parsing
 app.use(sanitizeInput);
@@ -209,7 +216,8 @@ app.use(async (req, res, next) => {
     req.path === '/health' ||
     req.path === '/' ||
     (req.path === '/api/v1/payments/nabil/checkout' && req.method === 'GET') ||
-    (req.path === '/nabil/checkout' && req.method === 'GET');
+    (req.path === '/nabil/checkout' && req.method === 'GET') ||
+    (req.path === '/api/v1/jitsi/token' && req.method === 'POST');
 
   if (skipDatabase) {
     return next();
@@ -247,9 +255,19 @@ app.get(
   (req, res, next) => paymentController.handleKhaltiCallback(req, res, next)
 );
 
+// Unified payment verification (alias per product contract; also under /api/v1/payments/transactions/verify)
+app.get(
+  '/api/payment/verify',
+  authenticate,
+  validate(verifyUnifiedTransactionQuerySchema),
+  (req, res, next) =>
+    paymentController.verifyUnifiedTransaction(req as AuthRequest, res, next)
+);
+
 // API routes
 // IMPORTANT: Mount payment routes BEFORE notificationRoutes to ensure checkout route is accessible
 // notificationRoutes is mounted at /api/v1 (parent path) and could intercept requests
+app.use('/api/v1/auth', authRoutes);
 app.use('/api/v1/users', userRoutes);
 app.use('/api/v1/products', productRoutes);
 app.use('/api/v1/product-enquiries', productEnquiryRoutes);
@@ -263,6 +281,8 @@ app.use('/api/v1/rudraksha-categories', rudrakshaCategoryRoutes);
 app.use('/api/v1/gem-categories', gemCategoryRoutes);
 app.use('/api/v1/transaction-logs', transactionLogRoutes); // Must be before notificationRoutes to avoid auth
 app.use('/api/v1/astrology', astrologyRoutes);
+app.use('/api/v1/jitsi', jitsiRoutes);
+app.use('/api/v1/cron', cronRoutes);
 app.use('/api/v1', notificationRoutes); // Mounted last to avoid intercepting specific routes
 
 // Error handling - must be last
@@ -282,6 +302,24 @@ if (!isServerless) {
     app.listen(env.PORT, '0.0.0.0', () => {
       console.log(`🚀 Server running on port ${env.PORT}`);
     });
+
+    if (env.ENABLE_INTERNAL_DAILY_RASHIFAL_CRON) {
+      const [{ default: cron }, { NotificationService }] = await Promise.all([
+        import('node-cron'),
+        import('@services/notification.service'),
+      ]);
+      cron.schedule(
+        '5 7 * * *',
+        () => {
+          void new NotificationService()
+            .sendDailyForecasts()
+            .then((r) => console.log('[cron] daily rashifal', r))
+            .catch((e) => console.error('[cron] daily rashifal failed', e));
+        },
+        { timezone: 'Asia/Kathmandu' }
+      );
+      console.log('⏰ Internal daily Rashifal cron scheduled (07:05 Asia/Kathmandu)');
+    }
   };
   startServer();
 }

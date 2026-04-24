@@ -80,8 +80,6 @@ const notificationPreferenceSchema = new Schema<INotificationPreference>(
   }
 );
 
-notificationPreferenceSchema.index({ user: 1 });
-
 export const NotificationPreferenceModel = mongoose.model<INotificationPreference>(
   'NotificationPreference',
   notificationPreferenceSchema

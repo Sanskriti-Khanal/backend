@@ -132,6 +132,11 @@ router.delete('/bookings/:id', validate(bookingIdSchema), adminController.delete
 // Orders / Payments
 router.get('/orders', adminController.getAllOrders);
 router.get('/orders/:id', validate(orderIdSchema), adminController.getOrderById);
+router.post(
+  '/orders/:id/retry-fulfillment',
+  validate(orderIdSchema),
+  adminController.retryProductOrderFulfillment
+);
 router.patch(
   '/orders/:id/status',
   validate(orderIdSchema),

@@ -13,8 +13,12 @@ import {
   updatePackageSchema,
   packageIdSchema,
   createReviewSchema,
+  createPackageReviewSchema,
   updateReviewSchema,
   reviewIdSchema,
+  initHealingSessionBookingSchema,
+  verifyHealingSessionBookingSchema,
+  healingOccupiedDatesQuerySchema,
 } from '@validators/healing.validator';
 
 const router = Router();
@@ -60,6 +64,22 @@ router.get(
   '/packages/:id',
   validate(packageIdSchema),
   healingController.getPackage
+);
+router.get(
+  '/packages/:id/reviews',
+  validate(packageIdSchema),
+  healingController.getPackageReviews
+);
+router.get(
+  '/packages/:id/details',
+  validate(packageIdSchema),
+  healingController.getPackageWithReviews
+);
+router.get(
+  '/packages/:id/review-eligibility',
+  authenticate,
+  validate(packageIdSchema),
+  healingController.getPackageReviewEligibility
 );
 router.get(
   '/packages/healer/:healerId',
@@ -114,6 +134,27 @@ router.delete(
   healingController.deletePackage
 );
 
+// Session availability (public — **paid/confirmed** dates only; pending checkout does not mark the calendar)
+router.get(
+  '/bookings/occupied-dates',
+  validate(healingOccupiedDatesQuerySchema),
+  healingController.getSessionOccupiedDates
+);
+
+// Session bookings (authenticated customers)
+router.post(
+  '/bookings/init',
+  authenticate,
+  validate(initHealingSessionBookingSchema),
+  healingController.initHealingSessionBooking
+);
+router.get(
+  '/bookings/verify',
+  authenticate,
+  validate(verifyHealingSessionBookingSchema),
+  healingController.verifyHealingSessionBooking
+);
+
 // Protected routes - Reviews (Authenticated users)
 router.post(
   '/listings/:id/reviews',
@@ -121,17 +162,35 @@ router.post(
   validate(createReviewSchema),
   healingController.createReview
 );
+router.post(
+  '/packages/:id/reviews',
+  authenticate,
+  validate(createPackageReviewSchema),
+  healingController.createPackageReview
+);
 router.put(
   '/reviews/:reviewId',
   authenticate,
   validate(updateReviewSchema),
   healingController.updateReview
 );
+router.put(
+  '/package-reviews/:reviewId',
+  authenticate,
+  validate(updateReviewSchema),
+  healingController.updatePackageReview
+);
 router.delete(
   '/reviews/:reviewId',
   authenticate,
   validate(reviewIdSchema),
   healingController.deleteReview
+);
+router.delete(
+  '/package-reviews/:reviewId',
+  authenticate,
+  validate(reviewIdSchema),
+  healingController.deletePackageReview
 );
 
 export default router;

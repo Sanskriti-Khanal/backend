@@ -17,18 +17,31 @@ const envSchema = z.object({
   // RS256: private key for signing, public key for verification (more secure than HS256)
   JWT_PRIVATE_KEY: z.string().min(100).refine((s) => s.includes('BEGIN'), { message: 'JWT_PRIVATE_KEY must be a PEM string (starts with -----BEGIN)' }),
   JWT_PUBLIC_KEY: z.string().min(100).refine((s) => s.includes('BEGIN'), { message: 'JWT_PUBLIC_KEY must be a PEM string (starts with -----BEGIN)' }),
-  /** Short-lived access JWT (e.g. with refresh / remember-me). */
+  /** Short-lived access JWT (used for all logins). */
   JWT_ACCESS_EXPIRE: z.string().default('15m'),
-  /** Refresh token lifetime when rememberMe is true. */
-  JWT_REFRESH_EXPIRE: z.string().default('7d'),
-  /** Access JWT when rememberMe is false (no refresh; session ends when client clears tokens). */
+  /** Refresh token lifetime when “Remember me” is checked (persistent login). */
+  JWT_REFRESH_EXPIRE_REMEMBER: z.string().default('60d'),
+  /** Refresh token lifetime when “Remember me” is unchecked (short session). */
+  JWT_REFRESH_EXPIRE_SESSION: z.string().default('1d'),
+  /** @deprecated Use JWT_REFRESH_EXPIRE_REMEMBER / JWT_REFRESH_EXPIRE_SESSION. */
+  JWT_REFRESH_EXPIRE: z.string().default('60d'),
+  /** @deprecated Access is always JWT_ACCESS_EXPIRE; kept for older deployments. */
   JWT_SESSION_EXPIRE: z.string().default('24h'),
+  /** One-time token after phone OTP verify, used to set/reset password without a second provider check. */
+  JWT_PASSWORD_SET_EXPIRE: z.string().default('15m'),
+  /** HttpOnly cookie name for refresh token. */
+  REFRESH_COOKIE_NAME: z.string().default('refresh_token'),
   /** @deprecated Legacy single expiry; defaults align with session-style token. */
   JWT_EXPIRE: z.string().default('24h'),
   /** @deprecated Legacy remember-me expiry; use JWT_ACCESS + JWT_REFRESH instead. */
   JWT_EXPIRE_REMEMBER: z.string().default('30d'),
   TWILIO_ACCOUNT_SID: z.string().optional(),
   TWILIO_AUTH_TOKEN: z.string().optional(),
+  TWILIO_API_KEY: z.string().optional(),
+  TWILIO_API_SECRET: z.string().optional(),
+  TWILIO_API_KEY_SID: z.string().optional(),
+  TWILIO_API_KEY_SECRET: z.string().optional(),
+  TWILIO_VERIFY_SERVICE_SID: z.string().optional(),
   TWILIO_PHONE_NUMBER: z.string().optional(),
   /** Alternative to Twilio: MSG91 (India/Nepal). Set MSG91_AUTH_KEY + MSG91_SENDER to use. */
   MSG91_AUTH_KEY: z.string().optional(),
@@ -77,6 +90,23 @@ const envSchema = z.object({
   SENTRY_DSN: z.string().url().optional(),
   /** Vedika astrology API (Ask MeroSathi); optional — route returns 503 if unset */
   VEDIKA_API_KEY: z.string().min(1).optional(),
+  // Jitsi JWT token generation
+  JITSI_DOMAIN: z.string().min(1).optional(),
+  JITSI_APP_ID: z.string().min(1).optional(),
+  JITSI_APP_SECRET: z.string().min(1).optional(),
+  JITSI_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(3600),
+  /** Shared secret for POST /api/v1/cron/* (Vercel / external schedulers). */
+  CRON_SECRET: z.string().min(1).optional(),
+  /** When true, daily job also sends FCM to users without astrology profile (soft nudge). */
+  DAILY_RASHIFAL_REMIND_INCOMPLETE: z
+    .string()
+    .optional()
+    .transform((v) => v === '1' || v === 'true' || v === 'yes'),
+  /** If "1", start in-process node-cron for daily Rashifal (non-serverless only). */
+  ENABLE_INTERNAL_DAILY_RASHIFAL_CRON: z
+    .string()
+    .optional()
+    .transform((v) => v === '1' || v === 'true'),
 });
 
 export type Env = z.infer<typeof envSchema>;

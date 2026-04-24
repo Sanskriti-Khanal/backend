@@ -1,6 +1,17 @@
 import mongoose, { Schema, Document } from 'mongoose';
 
 export enum OrderStatus {
+  /** Commerce (Cart → OrderDraft): optional pre-checkout row */
+  DRAFT = 'draft',
+  /** Checkout draft created; awaiting gateway funds */
+  PAYMENT_PENDING = 'payment_pending',
+  /** Gateway confirmed success; fulfillment may still be in progress */
+  PAID = 'paid',
+  FULFILLMENT_PENDING = 'fulfillment_pending',
+  /** Stock + internal fulfillment finished */
+  COMPLETED = 'completed',
+  /** Fulfillment failed after payment; requires ops / retry */
+  FAILED = 'failed',
   PENDING = 'pending',
   CONFIRMED = 'confirmed',
   PROCESSING = 'processing',
@@ -11,6 +22,8 @@ export enum OrderStatus {
   CANCELLED = 'cancelled',
   REFUNDED = 'refunded',
 }
+
+export type OrderFulfillmentProcessingState = 'idle' | 'processing' | 'done';
 
 export enum OrderSessionStatus {
   PENDING = 'pending',
@@ -59,6 +72,19 @@ export interface IOrder extends Document {
     source?: 'gps' | 'manual' | 'search';
     capturedAt?: Date;
   };
+  /** Server-owned snapshot from checkout (never trust payment gateway for this). */
+  deliverySnapshot?: {
+    preciseLocation: string;
+    latitude?: number;
+    longitude?: number;
+    source?: string;
+    shippingAddress?: IOrder['shippingAddress'];
+    capturedAt?: Date;
+  };
+  fulfillmentProcessingStatus?: OrderFulfillmentProcessingState;
+  fulfillmentFailureReason?: string;
+  /** Khalti/Nabil transaction id applied for idempotent stock + completion */
+  settledGatewayTransactionId?: string;
   sessionProgress?: Array<{
     sessionNumber: number;
     status: OrderSessionStatus;
@@ -162,6 +188,33 @@ const orderSchema = new Schema<IOrder>(
       capturedAt: {
         type: Date,
       },
+    },
+    deliverySnapshot: {
+      /** Validated in checkout flow for product/cart; optional at schema so non-delivery orders never fail. */
+      preciseLocation: { type: String },
+      latitude: { type: Number },
+      longitude: { type: Number },
+      source: { type: String },
+      shippingAddress: {
+        fullName: String,
+        phone: String,
+        address: String,
+        city: String,
+        state: String,
+        pincode: String,
+        country: String,
+      },
+      capturedAt: { type: Date },
+    },
+    fulfillmentProcessingStatus: {
+      type: String,
+      enum: ['idle', 'processing', 'done'],
+    },
+    fulfillmentFailureReason: {
+      type: String,
+    },
+    settledGatewayTransactionId: {
+      type: String,
     },
     sessionProgress: [
       {

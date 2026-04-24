@@ -13,13 +13,24 @@ import {
   PaymentMethod,
   PaymentType,
 } from '@models/Payment.model';
-import { IOrder, OrderSessionStatus, OrderStatus, OrderType } from '@models/Order.model';
+import {
+  IOrder,
+  OrderSessionStatus,
+  OrderStatus,
+  OrderType,
+} from '@models/Order.model';
+import {
+  assertProductCommerceTransition,
+  isProductCommerceLifecycle,
+} from './order-state-machine';
 import { BookingType } from '@models/JyotishBooking.model';
 import { NotFoundError, BadRequestError, ForbiddenError } from '@errors/AppError';
 import { isConsultationExpertRole, UserRole } from '@types';
 import crypto from 'crypto';
 import env from '@config/env';
 import logger from '@utils/logger';
+import { KhaltiService } from './khalti.service';
+import { NabilService } from './nabil.service';
 
 // TODO: Integrate with actual payment gateways (Razorpay, Stripe, etc.)
 // For now, this is a placeholder structure
@@ -33,6 +44,8 @@ export class PaymentService {
   private userRepository: UserRepository;
   private serviceAccessRepository: ServiceAccessRepository;
   private notificationService: NotificationService;
+  private readonly khaltiService = new KhaltiService();
+  private readonly nabilService = new NabilService();
 
   constructor() {
     this.paymentRepository = new PaymentRepository();
@@ -276,13 +289,51 @@ export class PaymentService {
   }
 
   /**
+   * Cart → OrderDraft: server-priced snapshot, awaiting payment (Khalti/Nabil).
+   */
+  async createProductCheckoutDraft(
+    userId: string,
+    items: Array<{ productId: string; quantity: number }>,
+    delivery: {
+      preciseLocation: string;
+      latitude?: number;
+      longitude?: number;
+      source?: string;
+      shippingAddress?: IOrder['shippingAddress'];
+    }
+  ): Promise<{ order: IOrder; totalAmount: number }> {
+    const loc = delivery.preciseLocation?.trim();
+    if (!loc || loc.length < 3) {
+      throw new BadRequestError('Delivery location is required for checkout');
+    }
+    const { order, totalAmount } = await this.createPendingProductOrderForGateway(
+      userId,
+      items,
+      loc,
+      {
+        latitude: delivery.latitude,
+        longitude: delivery.longitude,
+        source: delivery.source,
+        shippingAddress: delivery.shippingAddress,
+      }
+    );
+    return { order, totalAmount };
+  }
+
+  /**
    * Creates a pending product order for Khalti/Nabil mobile checkout (no Payment row yet).
    * Caller creates the gateway payment and links `payment` to this order afterward.
    */
   async createPendingProductOrderForGateway(
     userId: string,
     items: Array<{ productId: string; quantity: number }>,
-    preciseLocation?: string
+    preciseLocation?: string,
+    deliveryExtras?: {
+      latitude?: number;
+      longitude?: number;
+      source?: string;
+      shippingAddress?: IOrder['shippingAddress'];
+    }
   ): Promise<{ order: IOrder; totalAmount: number }> {
     if (!items.length) {
       throw new BadRequestError('At least one product item is required');
@@ -316,13 +367,33 @@ export class PaymentService {
       });
     }
 
+    const trimmedLoc = preciseLocation?.trim();
+    const deliverySnapshot =
+      trimmedLoc && trimmedLoc.length >= 3
+        ? {
+            preciseLocation: trimmedLoc,
+            ...(typeof deliveryExtras?.latitude === 'number'
+              ? { latitude: deliveryExtras.latitude }
+              : {}),
+            ...(typeof deliveryExtras?.longitude === 'number'
+              ? { longitude: deliveryExtras.longitude }
+              : {}),
+            ...(deliveryExtras?.source ? { source: deliveryExtras.source } : {}),
+            ...(deliveryExtras?.shippingAddress
+              ? { shippingAddress: deliveryExtras.shippingAddress }
+              : {}),
+            capturedAt: new Date(),
+          }
+        : undefined;
+
     const order = await this.paymentRepository.createOrder({
       user: userId as any,
       orderType: OrderType.PRODUCT,
       items: orderItems,
       totalAmount,
-      status: OrderStatus.PENDING,
-      ...(preciseLocation ? { notes: `Precise location: ${preciseLocation}` } : {}),
+      status: OrderStatus.PAYMENT_PENDING,
+      ...(deliverySnapshot ? { deliverySnapshot } : {}),
+      ...(trimmedLoc ? { notes: `Precise location: ${trimmedLoc}` } : {}),
     });
 
     return { order, totalAmount };
@@ -880,18 +951,28 @@ export class PaymentService {
         await this.grantServiceAccessForPayment(updatedPayment);
       }
 
-      // Update product stock if it's a product order
+      // Update product stock if it's a product order (idempotent across webhook + unified verify)
       const order = await this.paymentRepository.findOrderById(
         updatedPayment.orderId.toString()
       );
       if (order && order.orderType === OrderType.PRODUCT) {
-        for (const item of order.items) {
-          if (item.itemType === 'product') {
-            await this.productRepository.updateStock(
-              item.itemId.toString(),
-              -item.quantity
-            );
+        if (updatedPayment.metadata?.productStockApplied === true) {
+          // already decremented
+        } else {
+          for (const item of order.items) {
+            if (item.itemType === 'product') {
+              await this.productRepository.updateStock(
+                item.itemId.toString(),
+                -item.quantity
+              );
+            }
           }
+          await this.paymentRepository.updatePayment(updatedPayment._id.toString(), {
+            metadata: {
+              ...updatedPayment.metadata,
+              productStockApplied: true,
+            },
+          });
         }
       }
     }
@@ -1087,6 +1168,509 @@ export class PaymentService {
       amount,
       refundId: `refund_${Date.now()}`,
     };
+  }
+
+  async getOrderOwnedByUser(orderId: string, userId: string): Promise<IOrder> {
+    const order = await this.paymentRepository.findOrderByIdForUser(orderId, userId);
+    if (!order) {
+      throw new NotFoundError('Order not found');
+    }
+    return order;
+  }
+
+  /**
+   * Single entry: Khalti lookup + persist payment + product fulfillment state machine (idempotent).
+   */
+  async verifyAndSettleGatewayPaymentForOrder(input: {
+    userId: string;
+    orderId: string;
+    pidx?: string;
+    paymentId?: string;
+  }): Promise<{ order: IOrder; payment: IPayment }> {
+    const { userId, orderId, pidx, paymentId } = input;
+    if (!pidx && !paymentId) {
+      throw new BadRequestError('pidx or paymentId is required');
+    }
+    let payment: IPayment | null = null;
+    if (paymentId) {
+      payment = await this.paymentRepository.findPaymentById(paymentId);
+    } else if (pidx) {
+      payment = await this.paymentRepository.findPaymentByGatewayTransactionId(pidx);
+    }
+    if (!payment) {
+      throw new NotFoundError('Payment not found');
+    }
+    if (payment.user.toString() !== userId) {
+      throw new ForbiddenError('Unauthorized');
+    }
+    const boundOrderId = payment.orderId?.toString();
+    if (!boundOrderId || boundOrderId !== orderId) {
+      throw new BadRequestError('Payment is not bound to this order');
+    }
+
+    const pidxLive = (payment.gatewayTransactionId || pidx || '').trim();
+    if (!pidxLive) {
+      throw new BadRequestError('Missing Khalti pidx on payment');
+    }
+
+    const verifyResponse = await this.khaltiService.verifyPayment(pidxLive);
+
+    let paymentStatus = PaymentStatus.PENDING;
+    if (verifyResponse.status === 'Completed') {
+      paymentStatus = PaymentStatus.SUCCESS;
+    } else if (
+      verifyResponse.status === 'Failed' ||
+      verifyResponse.status === 'Expired'
+    ) {
+      paymentStatus = PaymentStatus.FAILED;
+    }
+
+    const previousPaymentStatus = payment.status;
+    const updatedPayment = await this.paymentRepository.updatePayment(payment._id.toString(), {
+      status: paymentStatus,
+      gatewayPaymentId: verifyResponse.transaction_id,
+      receipt: verifyResponse.transaction_id,
+      metadata: {
+        ...payment.metadata,
+        verification_status: verifyResponse.status,
+        total_amount: verifyResponse.total_amount,
+        fee: verifyResponse.fee,
+        refunded: verifyResponse.refunded,
+      },
+    });
+    if (!updatedPayment) {
+      throw new NotFoundError('Payment not found');
+    }
+
+    let order = await this.paymentRepository.findOrderById(orderId);
+    if (!order) {
+      throw new NotFoundError('Order not found');
+    }
+
+    if (updatedPayment.paymentType !== PaymentType.PRODUCT) {
+      if (paymentStatus === PaymentStatus.SUCCESS && updatedPayment.orderId) {
+        await this.applyLegacyKhaltiOrderSuccess(updatedPayment, previousPaymentStatus);
+        order = (await this.paymentRepository.findOrderById(orderId))!;
+      }
+      return { order, payment: updatedPayment };
+    }
+
+    if (paymentStatus !== PaymentStatus.SUCCESS) {
+      return { order, payment: updatedPayment };
+    }
+
+    const { order: settled } = await this.completeProductOrderAfterKhaltiSuccess(
+      updatedPayment,
+      verifyResponse
+    );
+    return { order: settled, payment: updatedPayment };
+  }
+
+  /**
+   * Worker / admin: replay fulfillment for stuck product orders (payment already SUCCESS).
+   */
+  async retryProductOrderFulfillment(orderId: string): Promise<IOrder> {
+    const order = await this.paymentRepository.findOrderById(orderId);
+    if (!order || order.orderType !== OrderType.PRODUCT) {
+      throw new NotFoundError('Product order not found');
+    }
+    const fullPayment = await this.paymentRepository.findLatestSuccessfulProductPaymentForOrder(
+      orderId
+    );
+    if (!fullPayment) {
+      throw new BadRequestError('No successful product payment for this order');
+    }
+    const txnId =
+      String(fullPayment.gatewayPaymentId || fullPayment.gatewayTransactionId || '').trim();
+    if (!txnId) {
+      throw new BadRequestError('Payment is missing gateway transaction reference');
+    }
+    const verifyShape = {
+      status: 'Completed',
+      total_amount: this.khaltiService.nprToPaisa(order.totalAmount),
+      transaction_id: fullPayment.gatewayPaymentId,
+    };
+    const { order: out } = await this.completeProductOrderAfterKhaltiSuccess(
+      fullPayment,
+      verifyShape
+    );
+    return out;
+  }
+
+  async completeProductOrderAfterKhaltiSuccess(
+    payment: IPayment,
+    verify: { status: string; total_amount: number; transaction_id?: string }
+  ): Promise<{ order: IOrder; idempotentReplay: boolean }> {
+    if (payment.paymentType !== PaymentType.PRODUCT || !payment.orderId) {
+      throw new BadRequestError('Product order payment required');
+    }
+    const oid = payment.orderId.toString();
+    const txnId = String(verify.transaction_id || payment.gatewayPaymentId || '').trim();
+    if (!txnId) {
+      throw new BadRequestError('Missing gateway transaction id');
+    }
+
+    let order = await this.paymentRepository.findOrderById(oid);
+    if (!order || order.orderType !== OrderType.PRODUCT) {
+      throw new NotFoundError('Product order not found');
+    }
+
+    const npr =
+      verify.total_amount === undefined || verify.total_amount === null
+        ? order.totalAmount
+        : this.khaltiService.paisaToNpr(Number(verify.total_amount));
+    if (Math.abs(npr - order.totalAmount) > 0.02) {
+      throw new BadRequestError('Payment amount does not match order total');
+    }
+
+    if (order.settledGatewayTransactionId && order.settledGatewayTransactionId !== txnId) {
+      throw new BadRequestError('Order already settled with a different gateway transaction');
+    }
+
+    if (order.status === OrderStatus.COMPLETED) {
+      return { order, idempotentReplay: true };
+    }
+    if (order.status === OrderStatus.CONFIRMED && payment.metadata?.productStockApplied === true) {
+      return { order, idempotentReplay: true };
+    }
+
+    const stockAlready = payment.metadata?.productStockApplied === true;
+
+    const commerceStates: OrderStatus[] = [
+      OrderStatus.PAYMENT_PENDING,
+      OrderStatus.PAID,
+      OrderStatus.FULFILLMENT_PENDING,
+      OrderStatus.FAILED,
+    ];
+    if (commerceStates.includes(order.status as OrderStatus)) {
+      order = await this.advanceProductOrderToPaidOrRetryFulfillment(order);
+      if (!stockAlready) {
+        order = await this.runProductFulfillmentPipeline(order, payment, txnId);
+      } else {
+        order = await this.markProductOrderCompleted(oid, txnId, order);
+      }
+      return { order, idempotentReplay: false };
+    }
+
+    if (order.status === OrderStatus.PENDING) {
+      if (!stockAlready) {
+        for (const item of order.items) {
+          if (item.itemType === 'product') {
+            await this.productRepository.updateStock(item.itemId.toString(), -item.quantity);
+          }
+        }
+        await this.paymentRepository.updatePayment(payment._id.toString(), {
+          metadata: { ...payment.metadata, productStockApplied: true },
+        });
+      }
+      await this.paymentRepository.updateOrder(oid, { status: OrderStatus.CONFIRMED });
+      order = (await this.paymentRepository.findOrderById(oid))!;
+      return { order, idempotentReplay: false };
+    }
+
+    throw new BadRequestError(`Order cannot be settled from status ${order.status}`);
+  }
+
+  private async advanceProductOrderToPaidOrRetryFulfillment(order: IOrder): Promise<IOrder> {
+    const oid = order._id.toString();
+    if (order.status === OrderStatus.PAYMENT_PENDING) {
+      assertProductCommerceTransition(order, OrderStatus.PAID);
+      await this.paymentRepository.updateOrder(oid, {
+        status: OrderStatus.PAID,
+        fulfillmentFailureReason: undefined,
+      });
+    } else if (order.status === OrderStatus.FAILED) {
+      assertProductCommerceTransition(order, OrderStatus.FULFILLMENT_PENDING);
+      await this.paymentRepository.updateOrder(oid, {
+        status: OrderStatus.FULFILLMENT_PENDING,
+        fulfillmentProcessingStatus: 'processing',
+        fulfillmentFailureReason: undefined,
+      });
+    }
+
+    let next = (await this.paymentRepository.findOrderById(oid))!;
+    if (next.status === OrderStatus.PAID) {
+      assertProductCommerceTransition(next, OrderStatus.FULFILLMENT_PENDING);
+      await this.paymentRepository.updateOrder(oid, {
+        status: OrderStatus.FULFILLMENT_PENDING,
+        fulfillmentProcessingStatus: 'processing',
+      });
+    }
+    const reloaded = await this.paymentRepository.findOrderById(oid);
+    if (!reloaded) {
+      throw new NotFoundError('Order not found');
+    }
+    return reloaded;
+  }
+
+  private async runProductFulfillmentPipeline(
+    order: IOrder,
+    payment: IPayment,
+    txnId: string
+  ): Promise<IOrder> {
+    const oid = order._id.toString();
+    try {
+      for (const item of order.items) {
+        if (item.itemType === 'product') {
+          await this.productRepository.updateStock(item.itemId.toString(), -item.quantity);
+        }
+      }
+      await this.paymentRepository.updatePayment(payment._id.toString(), {
+        metadata: {
+          ...payment.metadata,
+          productStockApplied: true,
+        },
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      await this.paymentRepository.updateOrder(oid, {
+        status: OrderStatus.FAILED,
+        fulfillmentFailureReason: msg,
+        fulfillmentProcessingStatus: 'idle',
+      });
+      throw e;
+    }
+    return this.markProductOrderCompleted(oid, txnId, order);
+  }
+
+  private async markProductOrderCompleted(
+    oid: string,
+    txnId: string,
+    order: IOrder
+  ): Promise<IOrder> {
+    const fresh = await this.paymentRepository.findOrderById(oid);
+    if (!fresh) {
+      throw new NotFoundError('Order not found');
+    }
+    if (isProductCommerceLifecycle(fresh)) {
+      assertProductCommerceTransition(fresh, OrderStatus.COMPLETED);
+    }
+    await this.paymentRepository.updateOrder(oid, {
+      status: OrderStatus.COMPLETED,
+      settledGatewayTransactionId: txnId,
+      fulfillmentProcessingStatus: 'done',
+    });
+    const done = await this.paymentRepository.findOrderById(oid);
+    if (!done) {
+      throw new NotFoundError('Order not found');
+    }
+    return done;
+  }
+
+  private async applyLegacyKhaltiOrderSuccess(
+    updatedPayment: IPayment,
+    previousStatus: PaymentStatus
+  ): Promise<void> {
+    if (!updatedPayment.orderId) {
+      return;
+    }
+    await this.paymentRepository.updateOrder(updatedPayment.orderId.toString(), {
+      status: OrderStatus.CONFIRMED,
+    });
+    if (updatedPayment.paymentType === PaymentType.JYOTISH_SERVICE) {
+      await this.grantServiceAccessForPayment(updatedPayment);
+    }
+    if (
+      previousStatus !== PaymentStatus.SUCCESS &&
+      (updatedPayment.paymentType === PaymentType.PUJA ||
+        updatedPayment.paymentType === PaymentType.HEALING)
+    ) {
+      await this.notifyServiceListingBooked(updatedPayment);
+    }
+  }
+
+  /**
+   * Poll Khalti for latest status and persist (order confirm + service notify).
+   * No-op if payment is not Khalti or not in a pending gateway state.
+   */
+  async syncKhaltiPaymentFromGatewayById(paymentId: string): Promise<IPayment | null> {
+    const payment = await this.paymentRepository.findPaymentById(paymentId);
+    if (!payment) return null;
+    const statusBeforeGatewayPoll = payment.status;
+    if (payment.paymentMethod !== PaymentMethod.KHALTI) return payment;
+    if (
+      payment.status !== PaymentStatus.PENDING &&
+      payment.status !== PaymentStatus.PROCESSING
+    ) {
+      return payment;
+    }
+    const pidx = payment.gatewayTransactionId;
+    if (!pidx) return payment;
+    let verifyResponse: {
+      status: string;
+      transaction_id?: string;
+      pidx?: string;
+      total_amount?: number;
+    };
+    try {
+      verifyResponse = await this.khaltiService.verifyPayment(pidx);
+    } catch (e) {
+      logger.warn('syncKhaltiPaymentFromGatewayById: Khalti verify failed', {
+        paymentId,
+        error: String(e),
+      });
+      return payment;
+    }
+
+    let paymentStatus = PaymentStatus.PENDING;
+    if (verifyResponse.status === 'Completed') {
+      paymentStatus = PaymentStatus.SUCCESS;
+    } else if (
+      verifyResponse.status === 'Failed' ||
+      verifyResponse.status === 'Expired'
+    ) {
+      paymentStatus = PaymentStatus.FAILED;
+    }
+
+    const updatedPayment = await this.paymentRepository.updatePayment(payment._id.toString(), {
+      status: paymentStatus,
+      gatewayPaymentId: verifyResponse.transaction_id,
+      receipt: verifyResponse.transaction_id,
+      metadata: {
+        ...payment.metadata,
+        verification_status: verifyResponse.status,
+      },
+    });
+
+    if (
+      paymentStatus === PaymentStatus.SUCCESS &&
+      updatedPayment?.orderId &&
+      statusBeforeGatewayPoll !== PaymentStatus.SUCCESS
+    ) {
+      if (updatedPayment.paymentType === PaymentType.PRODUCT) {
+        try {
+          await this.completeProductOrderAfterKhaltiSuccess(updatedPayment, {
+            status: verifyResponse.status,
+            total_amount:
+              verifyResponse.total_amount ??
+              this.khaltiService.nprToPaisa(updatedPayment.amount),
+            transaction_id: verifyResponse.transaction_id,
+          });
+        } catch (e) {
+          logger.error('syncKhaltiPaymentFromGatewayById: product settlement failed', {
+            paymentId,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
+      } else {
+        await this.applyLegacyKhaltiOrderSuccess(updatedPayment, statusBeforeGatewayPoll);
+      }
+    }
+
+    return updatedPayment;
+  }
+
+  /**
+   * Decrement product stock once per payment (webhook / unified verify / Khalti poll).
+   */
+  async applyProductStockIfNotYetApplied(payment: IPayment): Promise<void> {
+    if (payment.metadata?.productStockApplied === true) return;
+    if (!payment.orderId) return;
+    const order = await this.paymentRepository.findOrderById(payment.orderId.toString());
+    if (!order || order.orderType !== OrderType.PRODUCT) return;
+    for (const item of order.items) {
+      if (item.itemType === 'product') {
+        await this.productRepository.updateStock(item.itemId.toString(), -item.quantity);
+      }
+    }
+    await this.paymentRepository.updatePayment(payment._id.toString(), {
+      metadata: {
+        ...payment.metadata,
+        productStockApplied: true,
+      },
+    });
+  }
+
+  async syncNabilPaymentFromGatewayById(paymentId: string): Promise<IPayment | null> {
+    const payment = await this.paymentRepository.findPaymentById(paymentId);
+    if (!payment) return null;
+    const statusBeforeGatewayPoll = payment.status;
+    if (payment.paymentMethod !== PaymentMethod.NABIL) return payment;
+    if (
+      payment.status !== PaymentStatus.PENDING &&
+      payment.status !== PaymentStatus.PROCESSING
+    ) {
+      return payment;
+    }
+
+    let decryptedOrderID: string | undefined;
+    let decryptedSessionID: string | undefined;
+    if (payment.metadata?.decryptedOrderID && payment.metadata?.decryptedSessionID) {
+      decryptedOrderID = String(payment.metadata.decryptedOrderID);
+      decryptedSessionID = String(payment.metadata.decryptedSessionID);
+    } else if (payment.gatewayOrderId && payment.gatewaySessionId) {
+      try {
+        decryptedOrderID = this.nabilService.decryptNabilId(payment.gatewayOrderId);
+        decryptedSessionID = this.nabilService.decryptNabilId(payment.gatewaySessionId);
+      } catch (e) {
+        logger.warn('syncNabilPaymentFromGatewayById: decrypt failed', {
+          paymentId,
+          error: String(e),
+        });
+        return payment;
+      }
+    }
+    if (!decryptedOrderID || !decryptedSessionID) return payment;
+
+    let statusResponse: { orderStatus: number | string; responseCode?: string };
+    try {
+      statusResponse = await this.nabilService.getOrderStatus({
+        orderID: decryptedOrderID,
+        sessionID: decryptedSessionID,
+      });
+    } catch (e) {
+      logger.warn('syncNabilPaymentFromGatewayById: getOrderStatus failed', {
+        paymentId,
+        error: String(e),
+      });
+      return payment;
+    }
+
+    const mapped = this.nabilService.mapOrderStatusToPaymentStatus(statusResponse.orderStatus);
+    let paymentStatus: PaymentStatus = PaymentStatus.PROCESSING;
+    if (mapped === 'success') paymentStatus = PaymentStatus.SUCCESS;
+    else if (mapped === 'failed') paymentStatus = PaymentStatus.FAILED;
+    else if (mapped === 'cancelled') paymentStatus = PaymentStatus.CANCELLED;
+
+    const updatedPayment = await this.paymentRepository.updatePayment(payment._id.toString(), {
+      status: paymentStatus,
+      gatewayPaymentId: statusResponse.responseCode,
+    });
+
+    if (
+      paymentStatus === PaymentStatus.SUCCESS &&
+      updatedPayment?.orderId &&
+      statusBeforeGatewayPoll !== PaymentStatus.SUCCESS
+    ) {
+      await this.paymentRepository.updateOrder(updatedPayment.orderId.toString(), {
+        status: OrderStatus.CONFIRMED,
+      });
+
+      if (updatedPayment.paymentType === PaymentType.JYOTISH_SERVICE) {
+        await this.grantServiceAccessForPayment(updatedPayment);
+      }
+
+      if (
+        updatedPayment.paymentType === PaymentType.PUJA ||
+        updatedPayment.paymentType === PaymentType.HEALING
+      ) {
+        await this.notifyServiceListingBooked(updatedPayment);
+      }
+    }
+
+    return updatedPayment;
+  }
+
+  async syncPaymentFromGatewayById(paymentId: string): Promise<IPayment | null> {
+    const payment = await this.paymentRepository.findPaymentById(paymentId);
+    if (!payment) return null;
+    if (payment.paymentMethod === PaymentMethod.NABIL) {
+      return this.syncNabilPaymentFromGatewayById(paymentId);
+    }
+    if (payment.paymentMethod === PaymentMethod.KHALTI) {
+      return this.syncKhaltiPaymentFromGatewayById(paymentId);
+    }
+    return payment;
   }
 }
 

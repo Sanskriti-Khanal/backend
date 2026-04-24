@@ -21,7 +21,6 @@ const dailyForecastSchema = new Schema<IDailyForecast>(
     date: {
       type: Date,
       required: true,
-      unique: true,
     },
     zodiacSign: {
       type: String,
@@ -65,6 +64,7 @@ const dailyForecastSchema = new Schema<IDailyForecast>(
 
 dailyForecastSchema.index({ date: 1 });
 dailyForecastSchema.index({ zodiacSign: 1 });
+dailyForecastSchema.index({ date: 1, zodiacSign: 1 }, { unique: true });
 
 export const DailyForecastModel = mongoose.model<IDailyForecast>(
   'DailyForecast',

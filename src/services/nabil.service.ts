@@ -53,6 +53,7 @@ export class NabilService {
   private readonly keyPath: string;
   private httpsAgent: https.Agent | null = null;
   private readonly decryptionKey: string; // DES-ECB decryption key (hex)
+  private static configLogged = false;
 
   constructor() {
     // API URL: Use production URL from env, fallback to test URL
@@ -84,13 +85,16 @@ export class NabilService {
       isProductionEnv ? 'api.merosathi.co.production.key' : 'merosathi.key'
     );
     
-    // Log configuration (without sensitive values)
-    console.log('🔧 Nabil Service Configuration:');
-    console.log('  API URL:', this.apiUrl);
-    console.log('  Merchant ID:', this.merchantId);
-    console.log('  Decrypt Key:', this.decryptionKey ? `${this.decryptionKey.substring(0, 8)}...` : 'Not set');
-    console.log('  Environment:', isProductionEnv ? 'PRODUCTION' : 'TEST');
-    console.log('  Client cert mode:', isProductionEnv ? 'PRODUCTION' : 'TEST');
+    // Log configuration only once; this service is instantiated from multiple places.
+    if (!NabilService.configLogged) {
+      console.log('🔧 Nabil Service Configuration:');
+      console.log('  API URL:', this.apiUrl);
+      console.log('  Merchant ID:', this.merchantId);
+      console.log('  Decrypt Key:', this.decryptionKey ? `${this.decryptionKey.substring(0, 8)}...` : 'Not set');
+      console.log('  Environment:', isProductionEnv ? 'PRODUCTION' : 'TEST');
+      console.log('  Client cert mode:', isProductionEnv ? 'PRODUCTION' : 'TEST');
+      NabilService.configLogged = true;
+    }
     
     // Don't load certificates in constructor - load lazily when needed
     // This allows the module to load even if certificates are missing

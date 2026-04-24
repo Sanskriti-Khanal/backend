@@ -104,7 +104,6 @@ const paymentSchema = new Schema<IPayment>(
     },
     idempotencyKey: {
       type: String,
-      sparse: true, // Allow null values but enforce uniqueness when present
     },
     receipt: {
       type: String,
@@ -136,6 +135,16 @@ paymentSchema.index({ createdAt: -1 });
 paymentSchema.index({ user: 1, status: 1, createdAt: -1 });
 paymentSchema.index({ paymentType: 1, status: 1 });
 paymentSchema.index({ idempotencyKey: 1 }, { unique: true, sparse: true });
+paymentSchema.index(
+  { orderId: 1, gatewayPaymentId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      orderId: { $exists: true, $type: 'objectId' },
+      gatewayPaymentId: { $type: 'string', $gt: '' },
+    },
+  }
+);
 
 export const PaymentModel = mongoose.model<IPayment>('Payment', paymentSchema);
 

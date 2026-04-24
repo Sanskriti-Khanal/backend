@@ -1,3 +1,5 @@
+import { BadRequestError } from '@errors/AppError';
+
 // Generate 4-digit OTP (matches forgot-password UI design)
 export const generateOTP = (): string => {
   return Math.floor(1000 + Math.random() * 9000).toString();
@@ -31,6 +33,21 @@ export const normalizePhoneToE164 = (phone: string): string => {
   if (digits.length === 10) return `977${digits}`; // Nepal default
   if (digits.length >= 11) return digits;
   return digits;
+};
+
+/**
+ * Accepts +E.164, digits with country code, or 10-digit Nepal local — returns +digits for Twilio.
+ */
+export const toE164Plus = (phone: string): string => {
+  const digits = (phone || '').replace(/\D/g, '');
+  if (digits.length < 10) {
+    throw new BadRequestError('Phone number is too short (include country code or 10 digits for Nepal)');
+  }
+  const normalized = normalizePhoneToE164(digits);
+  if (normalized.length < 11) {
+    throw new BadRequestError('Invalid phone number');
+  }
+  return `+${normalized}`;
 };
 
 /**

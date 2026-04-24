@@ -2,6 +2,7 @@ import {
   PaymentModel,
   IPayment,
   PaymentStatus,
+  PaymentType,
 } from '@models/Payment.model';
 import {
   OrderModel,
@@ -19,6 +20,7 @@ const REVIEW_ELIGIBLE_ORDER_STATUSES: OrderStatus[] = [
   OrderStatus.SHIPPING,
   OrderStatus.SHIPPED,
   OrderStatus.DELIVERED,
+  OrderStatus.COMPLETED,
 ];
 
 export class PaymentRepository {
@@ -49,6 +51,29 @@ export class PaymentRepository {
     sessionId: string
   ): Promise<IPayment | null> {
     return PaymentModel.findOne({ gatewaySessionId: sessionId });
+  }
+
+  /**
+   * Latest healing payment whose client metadata references this healing session booking id.
+   * Used to self-heal when attachGatewayPayment failed or was skipped.
+   */
+  async findLatestHealingPaymentForSessionBookingId(
+    userId: string,
+    healingSessionBookingId: string
+  ): Promise<IPayment | null> {
+    return PaymentModel.findOne({
+      user: new Types.ObjectId(userId),
+      paymentType: PaymentType.HEALING,
+      'metadata.customerInfo.healingSessionBookingId': healingSessionBookingId,
+    }).sort({ createdAt: -1 });
+  }
+
+  async findPaymentByMerosathiTransactionId(
+    unifiedTransactionId: string
+  ): Promise<IPayment | null> {
+    return PaymentModel.findOne({
+      'metadata.merosathiTransactionId': unifiedTransactionId,
+    }).sort({ createdAt: -1 });
   }
 
   async findPaymentByIdempotencyKey(
@@ -121,6 +146,13 @@ export class PaymentRepository {
       .populate('payment');
   }
 
+  async findOrderByIdForUser(orderId: string, userId: string): Promise<IOrder | null> {
+    return OrderModel.findOne({ _id: orderId, user: userId })
+      .populate('user', 'fullName username phone')
+      .populate('serviceProvider', 'fullName username phone role')
+      .populate('payment');
+  }
+
   async findOrdersByUser(userId: string): Promise<IOrder[]> {
     return OrderModel.find({ user: userId })
       .populate('payment')
@@ -149,9 +181,34 @@ export class PaymentRepository {
 
   async findExpiredPendingOrders(expirationTime: Date): Promise<IOrder[]> {
     return OrderModel.find({
-      status: 'pending',
+      status: { $in: [OrderStatus.PENDING, OrderStatus.PAYMENT_PENDING] },
       createdAt: { $lt: expirationTime },
     });
+  }
+
+  /**
+   * Successful product payments whose domain fulfillment (stock / order completion) may be incomplete.
+   */
+  async findProductPaymentsNeedingFulfillment(limit: number = 50): Promise<IPayment[]> {
+    return PaymentModel.find({
+      paymentType: PaymentType.PRODUCT,
+      status: PaymentStatus.SUCCESS,
+      orderId: { $exists: true, $ne: null },
+      $nor: [{ 'metadata.productStockApplied': true }],
+    })
+      .sort({ updatedAt: 1 })
+      .limit(limit);
+  }
+
+  async findLatestSuccessfulProductPaymentForOrder(orderId: string): Promise<IPayment | null> {
+    if (!Types.ObjectId.isValid(orderId)) {
+      return null;
+    }
+    return PaymentModel.findOne({
+      orderId: new Types.ObjectId(orderId),
+      paymentType: PaymentType.PRODUCT,
+      status: PaymentStatus.SUCCESS,
+    }).sort({ updatedAt: -1 });
   }
 
   /**
@@ -160,8 +217,8 @@ export class PaymentRepository {
   async userHasCompletedServiceListingPurchase(
     userId: string,
     listingId: string,
-    orderType: OrderType.HEALING | OrderType.PUJA,
-    itemType: 'healing_listing' | 'puja_listing'
+    orderType: OrderType.HEALING | OrderType.PUJA | OrderType.PRODUCT,
+    itemType: 'healing_listing' | 'puja_listing' | 'product'
   ): Promise<boolean> {
     if (!Types.ObjectId.isValid(listingId)) {
       return false;
@@ -175,6 +232,94 @@ export class PaymentRepository {
         $elemMatch: {
           itemId: listingOid,
           itemType,
+        },
+      },
+    })
+      .select('_id')
+      .lean();
+    return doc != null;
+  }
+
+  /**
+   * True if user has a completed healing package session for the given listing.
+   * Used to allow per-session listing reviews from healing package flows.
+   */
+  async userHasCompletedHealingPackageSessionForListing(
+    userId: string,
+    listingId: string
+  ): Promise<boolean> {
+    if (!Types.ObjectId.isValid(listingId)) {
+      return false;
+    }
+    const listingOid = new Types.ObjectId(listingId);
+    const doc = await OrderModel.findOne({
+      user: userId,
+      orderType: OrderType.HEALING_PACKAGE,
+      status: { $in: REVIEW_ELIGIBLE_ORDER_STATUSES },
+      sessionProgress: {
+        $elemMatch: {
+          listingId: listingOid,
+          status: 'completed',
+        },
+      },
+    })
+      .select('_id')
+      .lean();
+    return doc != null;
+  }
+
+  /**
+   * True if user has at least one completed healing package session.
+   * Fallback for older rows where sessionProgress.listingId may be missing.
+   */
+  async userHasAnyCompletedHealingPackageSession(userId: string): Promise<boolean> {
+    const doc = await OrderModel.findOne({
+      user: userId,
+      orderType: OrderType.HEALING_PACKAGE,
+      sessionProgress: {
+        $elemMatch: {
+          status: 'completed',
+        },
+      },
+    })
+      .select('_id')
+      .lean();
+    return doc != null;
+  }
+
+  /**
+   * True if user has ever purchased a healing package order.
+   * Broad fallback for legacy records where session completion linkage is inconsistent.
+   */
+  async userHasAnyHealingPackageOrder(userId: string): Promise<boolean> {
+    const doc = await OrderModel.findOne({
+      user: userId,
+      orderType: OrderType.HEALING_PACKAGE,
+    })
+      .select('_id')
+      .lean();
+    return doc != null;
+  }
+
+  /**
+   * True if user has at least one completed-status healing package order for this package id.
+   */
+  async userHasCompletedHealingPackagePurchase(
+    userId: string,
+    packageId: string
+  ): Promise<boolean> {
+    if (!Types.ObjectId.isValid(packageId)) {
+      return false;
+    }
+    const packageOid = new Types.ObjectId(packageId);
+    const doc = await OrderModel.findOne({
+      user: userId,
+      orderType: OrderType.HEALING_PACKAGE,
+      status: { $in: REVIEW_ELIGIBLE_ORDER_STATUSES },
+      items: {
+        $elemMatch: {
+          itemId: packageOid,
+          itemType: 'healing_package',
         },
       },
     })

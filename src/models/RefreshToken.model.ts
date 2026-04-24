@@ -4,6 +4,11 @@ export interface IRefreshToken extends Document {
   userId: Types.ObjectId;
   tokenHash: string;
   expiresAt: Date;
+  /** Same value across rotations for one “session family” (reuse detection). */
+  familyId: Types.ObjectId;
+  rememberMe: boolean;
+  tokenVersionAtIssue: number;
+  deviceInfo?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -24,7 +29,25 @@ const refreshTokenSchema = new Schema<IRefreshToken>(
     expiresAt: {
       type: Date,
       required: true,
+    },
+    familyId: {
+      type: Schema.Types.ObjectId,
+      required: true,
       index: true,
+    },
+    rememberMe: {
+      type: Boolean,
+      required: true,
+      default: false,
+    },
+    tokenVersionAtIssue: {
+      type: Number,
+      required: true,
+      default: 0,
+    },
+    deviceInfo: {
+      type: String,
+      maxlength: 512,
     },
   },
   { timestamps: true }

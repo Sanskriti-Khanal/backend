@@ -1,5 +1,45 @@
 import { z } from 'zod';
 
+/** Healing session checkouts may carry this so we never require a delivery address. */
+const hasHealingSessionBookingInBody = (data: {
+  paymentType: string;
+  customerInfo?: { healingSessionBookingId?: string } | null;
+}): boolean => {
+  if (data.paymentType === 'healing') return true;
+  const id = data.customerInfo?.healingSessionBookingId;
+  return typeof id === 'string' && /^[0-9a-fA-F]{24}$/.test(id);
+};
+
+export const createProductCheckoutDraftSchema = z.object({
+  body: z.object({
+    items: z
+      .array(
+        z.object({
+          productId: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid product ID'),
+          quantity: z.number().int().positive('Quantity must be positive'),
+        })
+      )
+      .min(1, 'At least one item is required'),
+    deliveryLocation: z.object({
+      preciseLocation: z.string().min(3).max(500),
+      latitude: z.number().min(-90).max(90).optional(),
+      longitude: z.number().min(-180).max(180).optional(),
+      source: z.string().max(32).optional(),
+      shippingAddress: z
+        .object({
+          fullName: z.string().min(2),
+          phone: z.string().regex(/^[0-9]{10}$/),
+          address: z.string().min(5),
+          city: z.string().min(2),
+          state: z.string().min(2),
+          pincode: z.string().regex(/^[0-9]{6}$/),
+          country: z.string().min(2),
+        })
+        .optional(),
+    }),
+  }),
+});
+
 export const createProductPaymentSchema = z.object({
   body: z.object({
     items: z
@@ -61,11 +101,29 @@ export const createJyotishServicePaymentSchema = z.object({
 });
 
 export const verifyPaymentSchema = z.object({
-  body: z.object({
-    gatewayOrderId: z.string().min(1, 'Order ID is required'),
-    gatewayPaymentId: z.string().min(1, 'Payment ID is required'),
-    signature: z.string().min(1, 'Signature is required'),
-  }),
+  body: z
+    .object({
+      gatewayOrderId: z.string().min(1).optional(),
+      gatewayPaymentId: z.string().min(1).optional(),
+      signature: z.string().min(1).optional(),
+      orderId: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid order ID').optional(),
+      pidx: z.string().min(1).optional(),
+      paymentId: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid payment ID').optional(),
+    })
+    .superRefine((data, ctx) => {
+      const legacy =
+        !!data.gatewayOrderId?.trim() &&
+        !!data.gatewayPaymentId?.trim() &&
+        !!data.signature?.trim();
+      const bound = !!data.orderId && !!(data.pidx?.trim() || data.paymentId);
+      if (!legacy && !bound) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            'Provide either (gatewayOrderId, gatewayPaymentId, signature) for legacy verify, or (orderId + pidx|paymentId) for order-bound gateway verify',
+        });
+      }
+    }),
 });
 
 export const paymentIdSchema = z.object({
@@ -131,6 +189,8 @@ export const createNabilOrderSchema = z.object({
       phone: z.string().optional(),
       sessionMode: z.enum(['online', 'offline']).optional(),
       vaastuMode: z.enum(['online', 'offline']).optional(),
+      healingSessionBookingId: z.string().regex(/^[0-9a-fA-F]{24}$/).optional(),
+      merosathiTransactionId: z.string().regex(/^[0-9a-fA-F]{24}$/).optional(),
     }).optional(),
     preciseLocation: z.string().min(3).max(500).optional(),
   }).refine(
@@ -143,6 +203,7 @@ export const createNabilOrderSchema = z.object({
     { message: 'serviceProviderId and serviceType are required when paymentType is jyotish_service' }
   ).refine(
     (data) => {
+      if (hasHealingSessionBookingInBody(data)) return true;
       const requiresLocation =
         data.paymentType === 'product' ||
         (data.paymentType === 'puja' &&
@@ -193,6 +254,8 @@ export const createKhaltiOrderSchema = z.object({
       phone: z.string().optional(),
       sessionMode: z.enum(['online', 'offline']).optional(),
       vaastuMode: z.enum(['online', 'offline']).optional(),
+      healingSessionBookingId: z.string().regex(/^[0-9a-fA-F]{24}$/).optional(),
+      merosathiTransactionId: z.string().regex(/^[0-9a-fA-F]{24}$/).optional(),
     }).optional(),
     preciseLocation: z.string().min(3).max(500).optional(),
   }).refine(
@@ -205,6 +268,7 @@ export const createKhaltiOrderSchema = z.object({
     { message: 'serviceProviderId and serviceType are required when paymentType is jyotish_service' }
   ).refine(
     (data) => {
+      if (hasHealingSessionBookingInBody(data)) return true;
       const requiresLocation =
         data.paymentType === 'product' ||
         (data.paymentType === 'puja' &&
@@ -217,12 +281,20 @@ export const createKhaltiOrderSchema = z.object({
   ),
 });
 
+export const verifyUnifiedTransactionQuerySchema = z.object({
+  query: z.object({
+    transactionId: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid transaction id'),
+  }),
+});
+
 export const khaltiCallbackSchema = z.object({
   query: z.object({
     pidx: z.string().optional(),
     paymentId: z.string().optional(),
   }),
-});export const khaltiVerifySchema = z.object({
+});
+
+export const khaltiVerifySchema = z.object({
   body: z.object({
     pidx: z.string().min(1, 'pidx is required'),
   }),

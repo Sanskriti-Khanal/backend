@@ -101,7 +101,6 @@ const gemCategorySchema = new Schema<IGemCategory>(
 );
 
 // Indexes
-gemCategorySchema.index({ slug: 1 }, { unique: true });
 gemCategorySchema.index({ categoryType: 1 });
 gemCategorySchema.index({ isActive: 1 });
 gemCategorySchema.index({ displayOrder: 1 });

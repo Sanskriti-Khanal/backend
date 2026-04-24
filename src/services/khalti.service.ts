@@ -140,6 +140,7 @@ export class KhaltiService {
   private readonly apiUrl: string;
   private readonly secretKey: string;
   private readonly publicKey: string;
+  private static configLogged = false;
 
   constructor() {
     // Khalti API URLs
@@ -158,11 +159,14 @@ export class KhaltiService {
     this.secretKey = env.KHALTI_SECRET_KEY || '';
     this.publicKey = env.KHALTI_PUBLIC_KEY || '';
 
-    console.log('🔧 Khalti Service Configuration:');
-    console.log('  API URL:', this.apiUrl);
-    console.log('  Environment:', this.apiUrl.includes('dev.') ? 'TEST/SANDBOX' : 'PRODUCTION');
-    console.log('  Secret Key:', this.secretKey ? `${this.secretKey.substring(0, 8)}...` : 'Not set');
-    console.log('  Public Key:', this.publicKey ? `${this.publicKey.substring(0, 8)}...` : 'Not set');
+    if (!KhaltiService.configLogged) {
+      console.log('🔧 Khalti Service Configuration:');
+      console.log('  API URL:', this.apiUrl);
+      console.log('  Environment:', this.apiUrl.includes('dev.') ? 'TEST/SANDBOX' : 'PRODUCTION');
+      console.log('  Secret Key:', this.secretKey ? `${this.secretKey.substring(0, 8)}...` : 'Not set');
+      console.log('  Public Key:', this.publicKey ? `${this.publicKey.substring(0, 8)}...` : 'Not set');
+      KhaltiService.configLogged = true;
+    }
   }
 
   /**

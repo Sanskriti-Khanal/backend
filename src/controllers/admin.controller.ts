@@ -485,6 +485,19 @@ export class AdminController {
     }
   };
 
+  retryProductOrderFulfillment = async (
+    req: Request,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> => {
+    try {
+      const order = await this.adminService.retryProductOrderFulfillment(req.params.id);
+      sendSuccess(res, order, 'Fulfillment replay completed');
+    } catch (error) {
+      next(error);
+    }
+  };
+
   updateOrderStatus = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       const updated = await this.adminService.updateOrderStatus(req.params.id, req.body.status as OrderStatus);

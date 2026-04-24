@@ -10,7 +10,8 @@ import {
 import { IDailyForecast } from '@models/DailyForecast.model';
 import { INotificationPreference } from '@models/NotificationPreference.model';
 import { NotFoundError, BadRequestError } from '@errors/AppError';
-import { UserRole } from '@types';
+import { IUser } from '@models/User.model';
+import env from '@config/env';
 
 // Helper function to get zodiac sign from date of birth
 function getZodiacSign(dob: Date): string {
@@ -31,6 +32,41 @@ function getZodiacSign(dob: Date): string {
   return 'Pisces';
 }
 
+function resolveDobForZodiac(user: IUser): Date | null {
+  const ad = user.astroDetails;
+  if (ad?.dateOfBirth) {
+    const d = new Date(ad.dateOfBirth);
+    if (!Number.isNaN(d.getTime())) return d;
+  }
+  if (user.dob) {
+    const d = new Date(user.dob);
+    if (!Number.isNaN(d.getTime())) return d;
+  }
+  return null;
+}
+
+const RASHI_SIGN_NAMES = [
+  'Aries',
+  'Taurus',
+  'Gemini',
+  'Cancer',
+  'Leo',
+  'Virgo',
+  'Libra',
+  'Scorpio',
+  'Sagittarius',
+  'Capricorn',
+  'Aquarius',
+  'Pisces',
+];
+
+function signNameFromNumber(sign: number): string | null {
+  if (!Number.isFinite(sign)) return null;
+  const i = Math.trunc(sign);
+  if (i < 1 || i > 12) return null;
+  return RASHI_SIGN_NAMES[i - 1] ?? null;
+}
+
 export class NotificationService {
   private notificationRepository: NotificationRepository;
   private preferenceRepository: NotificationPreferenceRepository;
@@ -44,16 +80,217 @@ export class NotificationService {
     this.pushNotificationService = new PushNotificationService();
   }
 
+  private resolveTimeOfBirth(user: IUser): string | null {
+    const fromAstro = user.astroDetails?.timeOfBirth?.trim();
+    if (fromAstro) return fromAstro;
+    const fromLegacy = user.birthTime?.trim();
+    if (fromLegacy) return fromLegacy;
+    return null;
+  }
+
+  private resolvePlaceOfBirth(user: IUser): string | null {
+    const fromAstro = user.astroDetails?.placeOfBirth?.trim();
+    if (fromAstro) return fromAstro;
+    const fromLegacy = user.birthPlace?.trim();
+    if (fromLegacy) return fromLegacy;
+    return null;
+  }
+
+  private parseBirthTime(timeValue: string): { hour: number; minute: number } {
+    const parts = timeValue.split(':');
+    const hour = Number.parseInt(parts[0] ?? '12', 10);
+    const minute = Number.parseInt((parts[1] ?? '0').replace(/[^0-9]/g, ''), 10);
+    return {
+      hour: Number.isFinite(hour) ? Math.min(23, Math.max(0, hour)) : 12,
+      minute: Number.isFinite(minute) ? Math.min(59, Math.max(0, minute)) : 0,
+    };
+  }
+
+  private async resolveDailyrasifalContext(
+    user: IUser,
+    dob: Date
+  ): Promise<
+    | {
+        zodiacSign: string;
+        nativeMoonSign: number;
+        moonTravelSign: number;
+        tithiId: number;
+        date: Date;
+      }
+    | null
+  > {
+    const timeOfBirth = this.resolveTimeOfBirth(user);
+    const placeOfBirth = this.resolvePlaceOfBirth(user);
+    if (!timeOfBirth || !placeOfBirth) {
+      return null;
+    }
+
+    const BirthDetails = require('../astrology/models/BirthDetails');
+    const GocharService = require('../astrology/services/GocharService');
+    const LocationService = require('../astrology/services/LocationService');
+
+    const locationService = new LocationService();
+    locationService.init();
+
+    const placeParts = placeOfBirth
+      .split(',')
+      .map((p: string) => p.trim())
+      .filter(Boolean);
+    const cityQuery = placeParts[0] ?? placeOfBirth;
+    const countryHint = placeParts.length > 1 ? placeParts[placeParts.length - 1] : null;
+
+    let cities = locationService.searchCities(cityQuery, countryHint, 1) as Array<{
+      cityName: string;
+      country: string;
+    }>;
+    if (cities.length === 0 && countryHint) {
+      cities = locationService.searchCities(cityQuery, null, 1);
+    }
+    if (cities.length === 0) {
+      cities = locationService.searchCities(placeOfBirth, null, 1);
+    }
+    if (cities.length === 0) {
+      return null;
+    }
+
+    const city = cities[0];
+    const countryName = countryHint || city.country;
+    const countries = locationService.searchCountries(countryName, 25) as Array<{
+      name?: string;
+      timezone?: string;
+    }>;
+    const exactCountry =
+      countries.find(
+        (c) =>
+          (c.name ?? '').trim().toLowerCase() === countryName.trim().toLowerCase()
+      ) ??
+      countries.find(
+        (c) =>
+          (c.name ?? '').trim().toLowerCase() === city.country.trim().toLowerCase()
+      ) ??
+      countries[0];
+    const timezone = exactCountry?.timezone;
+    if (!timezone) {
+      return null;
+    }
+
+    const { hour, minute } = this.parseBirthTime(timeOfBirth);
+    const birthDetails = new BirthDetails({
+      name: user.fullName || user.username || 'User',
+      gender: user.astroDetails?.gender || 'male',
+      date_ad: {
+        year: dob.getUTCFullYear(),
+        month: dob.getUTCMonth() + 1,
+        day: dob.getUTCDate(),
+      },
+      time: { hour, minute },
+      location: {
+        cityName: city.cityName,
+        countryName: city.country,
+        timezone,
+      },
+    });
+
+    const validation = birthDetails.validate();
+    if (!validation.valid) {
+      return null;
+    }
+
+    const gocharData = await new GocharService().calculateGochar(birthDetails);
+    const moonTravelSign = Number(gocharData?.dailyrasifalContext?.moonTravelSign);
+    const tithiId = Number(gocharData?.dailyrasifalContext?.tithiId);
+    const nativeMoonSign = Number(
+      (gocharData?.birthChart?.planets ?? []).find((p: any) => p.id === 'moon')?.sign
+    );
+    const signName = signNameFromNumber(nativeMoonSign);
+    if (
+      !signName ||
+      !Number.isFinite(moonTravelSign) ||
+      !Number.isFinite(tithiId)
+    ) {
+      return null;
+    }
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    return {
+      zodiacSign: signName,
+      nativeMoonSign,
+      moonTravelSign,
+      tithiId,
+      date: today,
+    };
+  }
+
+  /**
+   * Fallback when Mongo `DailyForecast` is missing:
+   * compute current moon/tithi context and read text from astrology_predictions.db.
+   */
+  private async buildForecastFromAstrologyDb(
+    user: IUser,
+    dob: Date,
+    context?: {
+      zodiacSign: string;
+      nativeMoonSign: number;
+      moonTravelSign: number;
+      tithiId: number;
+      date: Date;
+    }
+  ): Promise<IDailyForecast | null> {
+    try {
+      const mj1Db = require('../astrology/database/mj1');
+      const resolved = context ?? (await this.resolveDailyrasifalContext(user, dob));
+      if (!resolved) {
+        return null;
+      }
+
+      const prediction = String(
+        mj1Db.getDailyRasifalPrediction(
+          resolved.moonTravelSign,
+          resolved.nativeMoonSign,
+          resolved.tithiId
+        ) ?? ''
+      ).trim();
+      if (!prediction) {
+        return null;
+      }
+
+      const fallback: Partial<IDailyForecast> = {
+        date: resolved.date,
+        zodiacSign: resolved.zodiacSign,
+        forecast: {
+          general: prediction,
+          love: prediction,
+          career: prediction,
+          health: prediction,
+          finance: prediction,
+        },
+      };
+      return fallback as IDailyForecast;
+    } catch (error) {
+      console.warn('Daily forecast fallback from astrology DB failed:', error);
+      return null;
+    }
+  }
+
   // Create daily forecast
   async createDailyForecast(
     data: Partial<IDailyForecast>
   ): Promise<IDailyForecast> {
-    // Check if forecast already exists for this date
-    const existing = await this.notificationRepository.findForecastByDate(
-      data.date!
+    if (!data.date || !data.zodiacSign) {
+      throw new BadRequestError('date and zodiacSign are required');
+    }
+
+    // Check if forecast already exists for this date and zodiac sign
+    const existing = await this.notificationRepository.findForecastByDateAndZodiac(
+      data.date,
+      data.zodiacSign
     );
     if (existing) {
-      throw new BadRequestError('Forecast already exists for this date');
+      throw new BadRequestError(
+        'Forecast already exists for this date and zodiac sign'
+      );
     }
 
     return this.notificationRepository.createForecast(data);
@@ -66,18 +303,38 @@ export class NotificationService {
       throw new NotFoundError('User not found');
     }
 
-    if (!user.dob) {
-      return null; // User doesn't have DOB, can't determine zodiac
+    const dob = resolveDobForZodiac(user);
+    if (!dob) {
+      return null;
     }
 
-    const zodiacSign = getZodiacSign(user.dob);
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    return this.notificationRepository.findForecastByDateAndZodiac(
-      today,
-      zodiacSign
-    );
+    const moonContext = await this.resolveDailyrasifalContext(user, dob);
+    if (moonContext?.zodiacSign) {
+      const moonForecast =
+        await this.notificationRepository.findForecastByDateAndZodiac(
+          today,
+          moonContext.zodiacSign
+        );
+      if (moonForecast) {
+        return moonForecast;
+      }
+    } else {
+      // Fallback to legacy western-sign lookup only when moon-sign context is unavailable.
+      const zodiacSign = getZodiacSign(dob);
+      const legacyForecast =
+        await this.notificationRepository.findForecastByDateAndZodiac(
+          today,
+          zodiacSign
+        );
+      if (legacyForecast) {
+        return legacyForecast;
+      }
+    }
+
+    return this.buildForecastFromAstrologyDb(user, dob, moonContext ?? undefined);
   }
 
   // Get forecast by date and zodiac
@@ -163,21 +420,16 @@ export class NotificationService {
   }
 
   // Send daily forecast notifications to all users
-  async sendDailyForecasts(): Promise<{ sent: number; failed: number }> {
+  async sendDailyForecasts(): Promise<{
+    sent: number;
+    failed: number;
+    remindersSent: number;
+    remindersFailed: number;
+  }> {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    // Only users who completed kundali onboarding should get daily horoscope notifications.
-    const users = await this.userRepository.findAll();
-    const eligibleUsers = users.filter(
-      (u) =>
-        u.isActive &&
-        u.role === UserRole.USER &&
-        u.kundaliCompleted === true &&
-        Boolean(u.dob) &&
-        Boolean(u.birthTime) &&
-        Boolean(u.birthPlace),
-    );
+    const eligibleUsers = await this.userRepository.findUsersEligibleForDailyRashifal();
 
     let sent = 0;
     let failed = 0;
@@ -185,38 +437,50 @@ export class NotificationService {
 
     for (const user of eligibleUsers) {
       try {
-        // Check if user has opted in for daily forecasts
         const shouldSend = await this.shouldSendNotification(
           user._id.toString(),
           NotificationType.DAILY_FORECAST
         );
 
         if (!shouldSend) {
-          continue; // Skip users who have opted out
+          continue;
         }
 
-        const zodiacSign = getZodiacSign(user.dob!);
+        const dob = resolveDobForZodiac(user);
+        if (!dob) {
+          continue;
+        }
+
+        const zodiacSign = getZodiacSign(dob);
         const forecast = await this.notificationRepository.findForecastByDateAndZodiac(
           today,
           zodiacSign
         );
 
         if (forecast) {
-          const title = `Daily Forecast for ${zodiacSign}`;
-          const message = `Today's Forecast:\n\nGeneral: ${forecast.forecast.general}\n\nLove: ${forecast.forecast.love}\n\nCareer: ${forecast.forecast.career}\n\nHealth: ${forecast.forecast.health}\n\nFinance: ${forecast.forecast.finance}${
+          const fullMessage = `Today's Forecast:\n\nGeneral: ${forecast.forecast.general}\n\nLove: ${forecast.forecast.love}\n\nCareer: ${forecast.forecast.career}\n\nHealth: ${forecast.forecast.health}\n\nFinance: ${forecast.forecast.finance}${
             forecast.luckyNumber ? `\n\nLucky Number: ${forecast.luckyNumber}` : ''
           }${forecast.luckyColor ? `\nLucky Color: ${forecast.luckyColor}` : ''}`;
+
+          const generalOneLine = forecast.forecast.general.replace(/\s+/g, ' ').trim();
+          const previewMax = 220;
+          const generalPreview =
+            generalOneLine.length <= previewMax
+              ? generalOneLine
+              : `${generalOneLine.slice(0, previewMax - 3)}...`;
+          const message = `${zodiacSign}: ${generalPreview}`;
 
           notifications.push({
             user: user._id,
             type: NotificationType.DAILY_FORECAST,
-            title,
+            title: 'Your Daily Rashifal is Ready',
             message,
             status: NotificationStatus.PENDING,
             metadata: {
               forecastId: forecast._id,
               zodiacSign,
               date: today,
+              fullMessage,
             },
           });
         }
@@ -226,16 +490,14 @@ export class NotificationService {
       }
     }
 
-    // Bulk insert notifications
     if (notifications.length > 0) {
       const createdNotifications = await this.notificationRepository.createBulkNotifications(notifications);
       sent = createdNotifications.length;
 
-      // Send push notifications
       for (const notification of createdNotifications) {
         try {
           const pushResult = await this.pushNotificationService.sendNotification(notification);
-          
+
           if (pushResult.sent > 0) {
             await this.notificationRepository.updateNotificationStatus(
               notification._id.toString(),
@@ -254,6 +516,51 @@ export class NotificationService {
             NotificationStatus.FAILED
           );
         }
+      }
+    }
+
+    const reminder = await this.sendIncompleteProfileReminderPushes();
+
+    return {
+      sent,
+      failed,
+      remindersSent: reminder.sent,
+      remindersFailed: reminder.failed,
+    };
+  }
+
+  /**
+   * Optional gentle FCM reminder for users without astrology profile (no in-app row).
+   * Enable with DAILY_RASHIFAL_REMIND_INCOMPLETE=true
+   */
+  private async sendIncompleteProfileReminderPushes(): Promise<{ sent: number; failed: number }> {
+    if (!env.DAILY_RASHIFAL_REMIND_INCOMPLETE) {
+      return { sent: 0, failed: 0 };
+    }
+
+    let sent = 0;
+    let failed = 0;
+    const users = await this.userRepository.findUsersNeedingAstroProfileReminder();
+
+    for (const user of users) {
+      try {
+        const allow = await this.shouldSendNotification(
+          user._id.toString(),
+          NotificationType.SYSTEM
+        );
+        if (!allow) continue;
+
+        const r = await this.pushNotificationService.sendToUser(
+          user._id.toString(),
+          'Unlock personalized Rashifal',
+          'Complete your profile to receive personalized daily Rashifal.',
+          { type: 'astro_profile_reminder' }
+        );
+        sent += r.sent;
+        failed += r.failed;
+      } catch (e) {
+        console.error(`Profile reminder failed for ${user._id}:`, e);
+        failed++;
       }
     }
 
@@ -307,19 +614,25 @@ export class NotificationService {
       title: string;
       message: string;
       metadata?: Record<string, any>;
+      /**
+       * When true, the record is created for the in-app inbox only (unread until opened).
+       * FCM / push is not invoked. Defaults to false for backward compatibility.
+       */
+      inAppOnly?: boolean;
     }
   ): Promise<INotification> {
+    const { inAppOnly, ...payload } = data;
     // Check if user has opted in for this notification type
     const shouldSend = await this.shouldSendNotification(userId, data.type);
-    
+
     const notification = await this.notificationRepository.createNotification({
       user: userId as any,
-      ...data,
+      ...payload,
       status: shouldSend ? NotificationStatus.PENDING : NotificationStatus.FAILED,
     });
 
-    // Send push notification if user has opted in
-    if (shouldSend) {
+    // Push only when not restricted to in-app delivery
+    if (shouldSend && !inAppOnly) {
       try {
         const pushResult = await this.pushNotificationService.sendNotification(notification);
         if (pushResult.sent > 0) {

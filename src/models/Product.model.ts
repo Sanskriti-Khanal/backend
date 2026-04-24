@@ -140,7 +140,6 @@ productSchema.index({ category: 1 });
 productSchema.index({ rudrakshaCategory: 1 });
 productSchema.index({ gemCategory: 1 });
 productSchema.index({ productType: 1 });
-productSchema.index({ sku: 1 });
 productSchema.index({ isActive: 1 });
 
 export const ProductModel = mongoose.model<IProduct>('Product', productSchema);

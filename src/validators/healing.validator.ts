@@ -97,6 +97,16 @@ export const createReviewSchema = z.object({
   }),
 });
 
+export const createPackageReviewSchema = z.object({
+  body: z.object({
+    rating: z.number().int().min(1).max(5, 'Rating must be between 1 and 5'),
+    comment: z.string().optional(),
+  }),
+  params: z.object({
+    id: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid package ID'),
+  }),
+});
+
 export const updateReviewSchema = z.object({
   body: z.object({
     rating: z.number().int().min(1).max(5).optional(),
@@ -110,6 +120,29 @@ export const updateReviewSchema = z.object({
 export const reviewIdSchema = z.object({
   params: z.object({
     reviewId: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid review ID'),
+  }),
+});
+
+export const initHealingSessionBookingSchema = z.object({
+  body: z.object({
+    sessionId: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid session id'),
+    listingType: z.enum(['service', 'package']),
+    scheduledDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD'),
+    timeSlot: z.string().min(1).max(32).optional(),
+    sessionMode: z.enum(['online', 'offline']),
+    amount: z.number().positive(),
+  }),
+});
+
+export const verifyHealingSessionBookingSchema = z.object({
+  query: z.object({
+    bookingId: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid booking id'),
+  }),
+});
+
+export const healingOccupiedDatesQuerySchema = z.object({
+  query: z.object({
+    sessionId: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid session id'),
   }),
 });
 

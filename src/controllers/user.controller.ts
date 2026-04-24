@@ -3,6 +3,12 @@ import { UserService } from '@services/user.service';
 import { addToBlacklist } from '@services/token-blacklist.service';
 import { sendSuccess } from '@utils/response.util';
 import { AuthRequest } from '@middleware/auth.middleware';
+import {
+  clearRefreshTokenCookie,
+  readRefreshTokenFromRequest,
+  setRefreshTokenCookie,
+} from '@utils/auth-cookie.util';
+import { BadRequestError } from '@errors/AppError';
 
 export class UserController {
   private userService: UserService;
@@ -41,8 +47,15 @@ export class UserController {
   login = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       const rememberMe = Boolean(req.body.rememberMe);
-      const result = await this.userService.login(req.body.username, req.body.password, rememberMe);
-      sendSuccess(res, result, 'Login successful');
+      const result = await this.userService.login(
+        req.body.username,
+        req.body.password,
+        rememberMe,
+        req.get('user-agent') ?? undefined
+      );
+      const { refreshToken, ...publicPayload } = result;
+      setRefreshTokenCookie(res, refreshToken, rememberMe);
+      sendSuccess(res, publicPayload, 'Login successful');
     } catch (error) {
       next(error);
     }
@@ -50,8 +63,14 @@ export class UserController {
 
   refresh = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      const result = await this.userService.refreshTokens(req.body.refreshToken);
-      sendSuccess(res, result, 'Token refreshed');
+      const plain = readRefreshTokenFromRequest(req);
+      if (!plain) {
+        throw new BadRequestError('Refresh token missing');
+      }
+      const result = await this.userService.refreshTokens(plain);
+      const { refreshToken, rememberMe, ...publicPayload } = result;
+      setRefreshTokenCookie(res, refreshToken, rememberMe);
+      sendSuccess(res, publicPayload, 'Token refreshed');
     } catch (error) {
       next(error);
     }
@@ -60,6 +79,7 @@ export class UserController {
   logout = async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
     try {
       await this.userService.revokeRefreshTokensForUser(req.user!.id);
+      clearRefreshTokenCookie(res);
       const authHeader = req.headers.authorization;
       if (authHeader && authHeader.startsWith('Bearer ')) {
         const token = authHeader.substring(7);
@@ -84,6 +104,15 @@ export class UserController {
     try {
       const user = await this.userService.updateProfile(req.user!.id, req.body);
       sendSuccess(res, user, 'Profile updated successfully');
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  saveAstroDetails = async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const user = await this.userService.saveAstroDetails(req.user!.id, req.body);
+      sendSuccess(res, user, 'Astrology profile saved');
     } catch (error) {
       next(error);
     }
@@ -126,7 +155,8 @@ export class UserController {
     try {
       const result = await this.userService.setPassword(
         req.body.phone,
-        req.body.password
+        req.body.password,
+        req.body.passwordSetToken
       );
       sendSuccess(res, result, 'Password set successfully');
     } catch (error) {

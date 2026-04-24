@@ -13,7 +13,7 @@ import {
   updateJyotishStatusSchema,
   resetPasswordSchema,
   setPasswordSchema,
-  refreshTokenSchema,
+  saveAstroDetailsSchema,
 } from '@validators/user.validator';
 
 const router = Router();
@@ -25,7 +25,6 @@ router.post('/send-otp', otpLimiter, validate(sendOTPSchema), userController.sen
 router.post('/verify-otp', otpLimiter, validate(verifyOTPSchema), userController.verifyOTP);
 router.post('/set-password', validate(setPasswordSchema), userController.setPassword);
 router.post('/login', loginLimiter, validate(loginSchema), userController.login);
-router.post('/refresh', loginLimiter, validate(refreshTokenSchema), userController.refresh);
 router.post('/reset-password', validate(resetPasswordSchema), userController.resetPassword);
 router.get('/experts', userController.getExperts);
 
@@ -35,6 +34,11 @@ router.use(authenticate);
 router.post('/logout', userController.logout);
 router.get('/profile', userController.getProfile);
 router.put('/profile', validate(updateProfileSchema), userController.updateProfile);
+router.post(
+  '/astro-details',
+  validate(saveAstroDetailsSchema),
+  userController.saveAstroDetails
+);
 router.put('/change-password', validate(changePasswordSchema), userController.changePassword);
 
 // Jyotish specific

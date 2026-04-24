@@ -15,6 +15,8 @@ import { NabilCallbackStatus, NabilLogType } from '@models/NabilCallback.model';
 import { BadRequestError, NotFoundError } from '@errors/AppError';
 import { TransactionLogRepository } from '@repositories/transaction-log.repository';
 import { TransactionLogType } from '@models/TransactionLog.model';
+import { HealingService } from '@services/healing.service';
+import { UnifiedTransactionService } from '@services/unified-transaction.service';
 import path from 'path';
 import fs from 'fs';
 
@@ -27,6 +29,7 @@ export class PaymentController {
   private transactionLogRepository: TransactionLogRepository;
   private jyotishRepository: JyotishRepository;
   private userRepository: UserRepository;
+  private healingService: HealingService;
   private static readonly SUPPORT_EMAIL = 'support@merosathi.co';
   private static readonly PAYMENT_SUCCESS_SUBTITLE =
     'Your transaction has been processed successfully. You can close this page and return to the app.';
@@ -63,6 +66,88 @@ export class PaymentController {
     this.transactionLogRepository = new TransactionLogRepository();
     this.jyotishRepository = new JyotishRepository();
     this.userRepository = new UserRepository();
+    this.healingService = new HealingService();
+  }
+
+  private buildGatewayPaymentMetadata(
+    description: string,
+    customerInfo: unknown
+  ): Record<string, unknown> {
+    const ci =
+      customerInfo &&
+      typeof customerInfo === 'object' &&
+      !Array.isArray(customerInfo)
+        ? (customerInfo as Record<string, unknown>)
+        : undefined;
+    const meta: Record<string, unknown> = { description };
+    if (ci?.merosathiTransactionId && typeof ci.merosathiTransactionId === 'string') {
+      meta.merosathiTransactionId = ci.merosathiTransactionId;
+    }
+    if (ci) {
+      meta.customerInfo = { ...ci };
+    }
+    return meta;
+  }
+
+  private async linkUnifiedTransactionIfPresent(
+    userId: string,
+    customerInfo: Record<string, unknown> | undefined,
+    paymentId: string,
+    paymentGateway: 'khalti' | 'nabil',
+    gatewayTransactionRef?: string
+  ): Promise<void> {
+    const mt = customerInfo?.merosathiTransactionId;
+    if (!mt || typeof mt !== 'string') return;
+    try {
+      const svc = new UnifiedTransactionService();
+      await svc.linkPaymentToTransaction({
+        transactionId: mt,
+        userId,
+        paymentId,
+        paymentGateway,
+        ...(gatewayTransactionRef ? { gatewayTransactionRef } : {}),
+      });
+    } catch (e) {
+      console.error('linkUnifiedTransactionIfPresent failed', e);
+    }
+  }
+
+  verifyUnifiedTransaction = async (
+    req: AuthRequest,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> => {
+    try {
+      const transactionId = String(req.query.transactionId || '').trim();
+      const svc = new UnifiedTransactionService();
+      const result = await svc.verifyTransaction(transactionId, req.user!.id);
+      sendSuccess(res, result);
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  private async linkHealingSessionBookingIfPresent(
+    userId: string,
+    customerInfo: Record<string, unknown> | undefined,
+    paymentType: PaymentType | string,
+    gatewayOrderId: string | undefined,
+    paymentId: string
+  ): Promise<void> {
+    const bid = customerInfo?.healingSessionBookingId;
+    if (!bid || typeof bid !== 'string') return;
+    if (!gatewayOrderId) return;
+    if (paymentType !== PaymentType.HEALING && paymentType !== 'healing') return;
+    try {
+      await this.healingService.attachGatewayPaymentToHealingSessionBooking(
+        userId,
+        bid,
+        gatewayOrderId,
+        paymentId
+      );
+    } catch (e) {
+      console.error('linkHealingSessionBookingIfPresent failed', e);
+    }
   }
 
   /**
@@ -533,6 +618,59 @@ export class PaymentController {
     }
   };
 
+  /**
+   * POST /api/v1/payments/orders/checkout-draft — Cart → OrderDraft (server-priced).
+   */
+  createProductCheckoutDraft = async (
+    req: AuthRequest,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> => {
+    try {
+      const { items, deliveryLocation } = req.body;
+      const { order, totalAmount } = await this.paymentService.createProductCheckoutDraft(
+        req.user!.id,
+        items,
+        {
+          preciseLocation: deliveryLocation.preciseLocation,
+          latitude: deliveryLocation.latitude,
+          longitude: deliveryLocation.longitude,
+          source: deliveryLocation.source,
+          shippingAddress: deliveryLocation.shippingAddress,
+        }
+      );
+      sendSuccess(
+        res,
+        {
+          orderId: order._id.toString(),
+          totalAmount,
+          status: order.status,
+          items: order.items,
+        },
+        'Checkout draft created',
+        201
+      );
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  getUserOrderById = async (
+    req: AuthRequest,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> => {
+    try {
+      const order = await this.paymentService.getOrderOwnedByUser(
+        req.params.id,
+        req.user!.id
+      );
+      sendSuccess(res, order);
+    } catch (error) {
+      next(error);
+    }
+  };
+
   createServicePayment = async (
     req: AuthRequest,
     res: Response,
@@ -593,10 +731,39 @@ export class PaymentController {
     next: NextFunction
   ): Promise<void> => {
     try {
+      const body = req.body as Record<string, unknown>;
+      const orderId = typeof body.orderId === 'string' ? body.orderId.trim() : '';
+      const pidx = typeof body.pidx === 'string' ? body.pidx.trim() : '';
+      const paymentId = typeof body.paymentId === 'string' ? body.paymentId.trim() : '';
+
+      if (orderId && (pidx || paymentId)) {
+        const authReq = req as AuthRequest;
+        if (!authReq.user?.id) {
+          throw new BadRequestError('Authentication required');
+        }
+        const result = await this.paymentService.verifyAndSettleGatewayPaymentForOrder({
+          userId: authReq.user.id,
+          orderId,
+          ...(pidx ? { pidx } : {}),
+          ...(paymentId ? { paymentId } : {}),
+        });
+        sendSuccess(
+          res,
+          {
+            order: result.order,
+            payment: result.payment,
+            orderStatus: result.order.status,
+            paymentStatus: result.payment.status,
+          },
+          'Payment verified and order updated'
+        );
+        return;
+      }
+
       const payment = await this.paymentService.verifyPayment(
-        req.body.gatewayOrderId,
-        req.body.gatewayPaymentId,
-        req.body.signature
+        body.gatewayOrderId as string,
+        body.gatewayPaymentId as string,
+        body.signature as string
       );
       sendSuccess(res, payment, 'Payment verified successfully');
     } catch (error) {
@@ -840,6 +1007,12 @@ export class PaymentController {
       const userId = req.user!.id;
       const normalizedPreciseLocation =
         typeof preciseLocation === 'string' ? preciseLocation.trim() : '';
+      const healingBid = (customerInfo as Record<string, unknown> | undefined)?.healingSessionBookingId;
+      const hasHealingSessionBookingRow =
+        paymentType === PaymentType.HEALING ||
+        paymentType === 'healing' ||
+        (typeof healingBid === 'string' && /^[0-9a-fA-F]{24}$/.test(healingBid));
+      const effectivePaymentType: string = hasHealingSessionBookingRow ? 'healing' : String(paymentType);
       const isOfflinePujaBooking =
         (paymentType === PaymentType.PUJA || paymentType === 'puja') &&
         customerInfo?.sessionMode === 'offline';
@@ -848,12 +1021,25 @@ export class PaymentController {
           paymentType === 'jyotish_service') &&
         customerInfo?.vaastuMode === 'offline';
 
+      let nabilProductOrderHasDeliverySnapshot = false;
       if (
-        (paymentType === PaymentType.PRODUCT ||
-          paymentType === 'product' ||
+        (effectivePaymentType === PaymentType.PRODUCT || effectivePaymentType === 'product') &&
+        typeof productOrderId === 'string' &&
+        /^[0-9a-fA-F]{24}$/.test(productOrderId)
+      ) {
+        const draft = await this.paymentRepository.findOrderById(productOrderId);
+        const snap = draft?.deliverySnapshot?.preciseLocation?.trim();
+        nabilProductOrderHasDeliverySnapshot = !!snap && snap.length >= 3;
+      }
+
+      if (
+        !hasHealingSessionBookingRow &&
+        (effectivePaymentType === PaymentType.PRODUCT ||
+          effectivePaymentType === 'product' ||
           isOfflinePujaBooking ||
           isOfflineVaastuBooking) &&
-        !normalizedPreciseLocation
+        !normalizedPreciseLocation &&
+        !nabilProductOrderHasDeliverySnapshot
       ) {
         throw new BadRequestError(
           'Precise location is required before payment for product purchase, offline Puja, and offline Vaastu booking'
@@ -939,64 +1125,126 @@ export class PaymentController {
 
       let gatewayOrderId: string | undefined;
 
-      if (paymentType === PaymentType.PRODUCT || paymentType === 'product') {
-        const rawItems = Array.isArray(items) ? items : [];
-        const lineItems: Array<{ productId: string; quantity: number }> = rawItems
-          .filter(
-            (row: any) =>
-              row &&
-              typeof row.productId === 'string' &&
-              /^[0-9a-fA-F]{24}$/.test(row.productId) &&
-              typeof row.quantity === 'number' &&
-              Number.isFinite(row.quantity) &&
-              row.quantity >= 1
-          )
-          .map((row: any) => ({
-            productId: row.productId,
-            quantity: Math.floor(row.quantity),
-          }));
-        const effectiveItems =
-          lineItems.length > 0
-            ? lineItems
-            : productOrderId
-              ? [{ productId: productOrderId, quantity: 1 }]
-              : [];
-        if (effectiveItems.length === 0) {
-          throw new BadRequestError(
-            'Product checkout requires items (cart lines with productId and quantity) or productOrderId'
+      if (effectivePaymentType === PaymentType.PRODUCT || effectivePaymentType === 'product') {
+        if (
+          typeof productOrderId === 'string' &&
+          /^[0-9a-fA-F]{24}$/.test(productOrderId) &&
+          (!items || (Array.isArray(items) && items.length === 0))
+        ) {
+          const existing = await this.paymentRepository.findOrderByIdForUser(
+            productOrderId,
+            userId
           );
+          if (!existing || existing.orderType !== OrderType.PRODUCT) {
+            throw new BadRequestError('Invalid product checkout draft');
+          }
+          if (
+            existing.status !== OrderStatus.PAYMENT_PENDING &&
+            existing.status !== OrderStatus.PENDING
+          ) {
+            throw new BadRequestError('Order is not awaiting payment');
+          }
+          if (Math.abs(amount - existing.totalAmount) > 0.02) {
+            throw new BadRequestError(
+              `Amount mismatch: server total is NPR ${existing.totalAmount}, request had NPR ${amount}`
+            );
+          }
+          gatewayOrderId = existing._id.toString();
+        } else {
+          const rawItems = Array.isArray(items) ? items : [];
+          const lineItems: Array<{ productId: string; quantity: number }> = rawItems
+            .filter(
+              (row: any) =>
+                row &&
+                typeof row.productId === 'string' &&
+                /^[0-9a-fA-F]{24}$/.test(row.productId) &&
+                typeof row.quantity === 'number' &&
+                Number.isFinite(row.quantity) &&
+                row.quantity >= 1
+            )
+            .map((row: any) => ({
+              productId: row.productId,
+              quantity: Math.floor(row.quantity),
+            }));
+          const effectiveItems =
+            lineItems.length > 0
+              ? lineItems
+              : productOrderId
+                ? [{ productId: productOrderId, quantity: 1 }]
+                : [];
+          if (effectiveItems.length === 0) {
+            throw new BadRequestError(
+              'Product checkout requires items (cart lines with productId and quantity) or productOrderId'
+            );
+          }
+          const latRaw = (customerInfo as Record<string, unknown> | undefined)?.locationLat;
+          const lngRaw = (customerInfo as Record<string, unknown> | undefined)?.locationLng;
+          const srcRaw = (customerInfo as Record<string, unknown> | undefined)?.locationSource;
+          const lat =
+            typeof latRaw === 'string' && latRaw.trim() !== ''
+              ? Number(latRaw)
+              : typeof latRaw === 'number'
+                ? latRaw
+                : undefined;
+          const lng =
+            typeof lngRaw === 'string' && lngRaw.trim() !== ''
+              ? Number(lngRaw)
+              : typeof lngRaw === 'number'
+                ? lngRaw
+                : undefined;
+          const source = typeof srcRaw === 'string' ? srcRaw : undefined;
+          const { order, totalAmount } =
+            await this.paymentService.createPendingProductOrderForGateway(
+              userId,
+              effectiveItems,
+              normalizedPreciseLocation || undefined,
+              {
+                ...(typeof lat === 'number' && !Number.isNaN(lat) ? { latitude: lat } : {}),
+                ...(typeof lng === 'number' && !Number.isNaN(lng) ? { longitude: lng } : {}),
+                ...(source ? { source } : {}),
+              }
+            );
+          if (Math.abs(amount - totalAmount) > 0.02) {
+            throw new BadRequestError(
+              `Amount mismatch: server total is NPR ${totalAmount}, request had NPR ${amount}`
+            );
+          }
+          gatewayOrderId = order._id.toString();
         }
-        const { order, totalAmount } =
-          await this.paymentService.createPendingProductOrderForGateway(
-            userId,
-            effectiveItems,
-            normalizedPreciseLocation
-          );
-        if (Math.abs(amount - totalAmount) > 0.02) {
-          throw new BadRequestError(
-            `Amount mismatch: server total is NPR ${totalAmount}, request had NPR ${amount}`
-          );
-        }
-        gatewayOrderId = order._id.toString();
       } else if (
-        (paymentType === PaymentType.HEALING ||
-          paymentType === PaymentType.PUJA ||
-          paymentType === 'healing' ||
-          paymentType === 'puja') &&
-        orderId
+        (effectivePaymentType === PaymentType.HEALING ||
+          effectivePaymentType === PaymentType.PUJA ||
+          effectivePaymentType === 'healing' ||
+          effectivePaymentType === 'puja') &&
+        (() => {
+          const a =
+            typeof orderId === 'string' && orderId.trim() !== '' ? orderId.trim() : '';
+          const b =
+            typeof productOrderId === 'string' && productOrderId.trim() !== ''
+              ? productOrderId.trim()
+              : '';
+          const ref = a || b;
+          return ref && /^[0-9a-fA-F]{24}$/.test(ref) ? ref : '';
+        })()
       ) {
-        const existingOrder = await this.paymentRepository.findOrderById(orderId);
+        const healingPujaRef =
+          (typeof orderId === 'string' && orderId.trim() !== '' ? orderId.trim() : '') ||
+          (typeof productOrderId === 'string' && productOrderId.trim() !== ''
+            ? productOrderId.trim()
+            : '');
+        const existingOrder = await this.paymentRepository.findOrderById(healingPujaRef);
         if (existingOrder) {
           gatewayOrderId = existingOrder._id.toString();
         } else {
-          const normalizedType =
-            paymentType === PaymentType.HEALING || paymentType === 'healing'
-              ? 'healing'
-              : 'puja';
+          const normalizedType: 'healing' | 'puja' = hasHealingSessionBookingRow
+            ? 'healing'
+            : paymentType === PaymentType.PUJA || paymentType === 'puja'
+              ? 'puja'
+              : 'healing';
           const { order, totalAmount } =
             await this.paymentService.createPendingServiceOrderForGateway(userId, {
               paymentType: normalizedType,
-              referenceId: orderId,
+              referenceId: healingPujaRef,
               preciseLocation: normalizedPreciseLocation || undefined,
             });
           if (Math.abs(amount - totalAmount) > 0.02) {
@@ -1015,10 +1263,8 @@ export class PaymentController {
         currency: 'NPR',
         status: PaymentStatus.PENDING,
         paymentMethod: PaymentMethod.NABIL,
-        paymentType: paymentType as PaymentType,
-        metadata: {
-          description,
-        },
+        paymentType: effectivePaymentType as PaymentType,
+        metadata: this.buildGatewayPaymentMetadata(description, customerInfo),
       };
 
       if (gatewayOrderId) {
@@ -1042,6 +1288,14 @@ export class PaymentController {
           payment: payment._id,
         });
       }
+
+      await this.linkHealingSessionBookingIfPresent(
+        userId,
+        customerInfo as Record<string, unknown> | undefined,
+        effectivePaymentType,
+        gatewayOrderId,
+        payment._id.toString()
+      );
 
       // Generate unique transaction ID for logging
       const transactionId = `TXN_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -1213,6 +1467,14 @@ export class PaymentController {
         },
       });
 
+      await this.linkUnifiedTransactionIfPresent(
+        userId,
+        customerInfo as Record<string, unknown> | undefined,
+        payment._id.toString(),
+        'nabil',
+        nabilResponse.decryptedOrderID
+      );
+
       // Check if XML format is requested (for UAT with Swikar Sir)
       const acceptHeader = req.headers.accept || '';
       const format = req.query.format as string;
@@ -1280,6 +1542,15 @@ export class PaymentController {
       const userId = req.user!.id;
       const normalizedPreciseLocation =
         typeof preciseLocation === 'string' ? preciseLocation.trim() : '';
+      const healingBidKhalti = (customerInfo as Record<string, unknown> | undefined)
+        ?.healingSessionBookingId;
+      const hasHealingSessionBookingRowKhalti =
+        paymentType === PaymentType.HEALING ||
+        paymentType === 'healing' ||
+        (typeof healingBidKhalti === 'string' && /^[0-9a-fA-F]{24}$/.test(healingBidKhalti));
+      const effectivePaymentType: string = hasHealingSessionBookingRowKhalti
+        ? 'healing'
+        : String(paymentType);
       const isOfflinePujaBooking =
         (paymentType === PaymentType.PUJA || paymentType === 'puja') &&
         customerInfo?.sessionMode === 'offline';
@@ -1288,12 +1559,25 @@ export class PaymentController {
           paymentType === 'jyotish_service') &&
         customerInfo?.vaastuMode === 'offline';
 
+      let khaltiProductOrderHasDeliverySnapshot = false;
       if (
-        (paymentType === PaymentType.PRODUCT ||
-          paymentType === 'product' ||
+        (effectivePaymentType === PaymentType.PRODUCT || effectivePaymentType === 'product') &&
+        typeof productOrderId === 'string' &&
+        /^[0-9a-fA-F]{24}$/.test(productOrderId)
+      ) {
+        const draft = await this.paymentRepository.findOrderById(productOrderId);
+        const snap = draft?.deliverySnapshot?.preciseLocation?.trim();
+        khaltiProductOrderHasDeliverySnapshot = !!snap && snap.length >= 3;
+      }
+
+      if (
+        !hasHealingSessionBookingRowKhalti &&
+        (effectivePaymentType === PaymentType.PRODUCT ||
+          effectivePaymentType === 'product' ||
           isOfflinePujaBooking ||
           isOfflineVaastuBooking) &&
-        !normalizedPreciseLocation
+        !normalizedPreciseLocation &&
+        !khaltiProductOrderHasDeliverySnapshot
       ) {
         throw new BadRequestError(
           'Precise location is required before payment for product purchase, offline Puja, and offline Vaastu booking'
@@ -1338,16 +1622,29 @@ export class PaymentController {
           paymentRequest.customer_info = khaltiCustomer;
         }
         const khaltiResponse = await this.khaltiService.initiatePayment(paymentRequest);
+        const jyotishMeta: Record<string, unknown> = {
+          ...payment.metadata,
+          pidx: khaltiResponse.pidx,
+          expires_at: khaltiResponse.expires_at,
+          expires_in: khaltiResponse.expires_in,
+        };
+        const ciUnified = (customerInfo as Record<string, unknown> | undefined)
+          ?.merosathiTransactionId;
+        if (typeof ciUnified === 'string') {
+          jyotishMeta.merosathiTransactionId = ciUnified;
+        }
         await this.paymentRepository.updatePayment(payment._id.toString(), {
           gatewayTransactionId: khaltiResponse.pidx,
           status: PaymentStatus.PROCESSING,
-          metadata: {
-            ...payment.metadata,
-            pidx: khaltiResponse.pidx,
-            expires_at: khaltiResponse.expires_at,
-            expires_in: khaltiResponse.expires_in,
-          },
+          metadata: jyotishMeta,
         });
+        await this.linkUnifiedTransactionIfPresent(
+          userId,
+          customerInfo as Record<string, unknown> | undefined,
+          payment._id.toString(),
+          'khalti',
+          khaltiResponse.pidx
+        );
         return sendSuccess(res, {
           pidx: khaltiResponse.pidx,
           payment_url: khaltiResponse.payment_url,
@@ -1386,64 +1683,126 @@ export class PaymentController {
 
       let gatewayOrderId: string | undefined;
 
-      if (paymentType === PaymentType.PRODUCT || paymentType === 'product') {
-        const rawItems = Array.isArray(items) ? items : [];
-        const lineItems: Array<{ productId: string; quantity: number }> = rawItems
-          .filter(
-            (row: any) =>
-              row &&
-              typeof row.productId === 'string' &&
-              /^[0-9a-fA-F]{24}$/.test(row.productId) &&
-              typeof row.quantity === 'number' &&
-              Number.isFinite(row.quantity) &&
-              row.quantity >= 1
-          )
-          .map((row: any) => ({
-            productId: row.productId,
-            quantity: Math.floor(row.quantity),
-          }));
-        const effectiveItems =
-          lineItems.length > 0
-            ? lineItems
-            : productOrderId
-              ? [{ productId: productOrderId, quantity: 1 }]
-              : [];
-        if (effectiveItems.length === 0) {
-          throw new BadRequestError(
-            'Product checkout requires items (cart lines with productId and quantity) or productOrderId'
+      if (effectivePaymentType === PaymentType.PRODUCT || effectivePaymentType === 'product') {
+        if (
+          typeof productOrderId === 'string' &&
+          /^[0-9a-fA-F]{24}$/.test(productOrderId) &&
+          (!items || (Array.isArray(items) && items.length === 0))
+        ) {
+          const existing = await this.paymentRepository.findOrderByIdForUser(
+            productOrderId,
+            userId
           );
+          if (!existing || existing.orderType !== OrderType.PRODUCT) {
+            throw new BadRequestError('Invalid product checkout draft');
+          }
+          if (
+            existing.status !== OrderStatus.PAYMENT_PENDING &&
+            existing.status !== OrderStatus.PENDING
+          ) {
+            throw new BadRequestError('Order is not awaiting payment');
+          }
+          if (Math.abs(amount - existing.totalAmount) > 0.02) {
+            throw new BadRequestError(
+              `Amount mismatch: server total is NPR ${existing.totalAmount}, request had NPR ${amount}`
+            );
+          }
+          gatewayOrderId = existing._id.toString();
+        } else {
+          const rawItems = Array.isArray(items) ? items : [];
+          const lineItems: Array<{ productId: string; quantity: number }> = rawItems
+            .filter(
+              (row: any) =>
+                row &&
+                typeof row.productId === 'string' &&
+                /^[0-9a-fA-F]{24}$/.test(row.productId) &&
+                typeof row.quantity === 'number' &&
+                Number.isFinite(row.quantity) &&
+                row.quantity >= 1
+            )
+            .map((row: any) => ({
+              productId: row.productId,
+              quantity: Math.floor(row.quantity),
+            }));
+          const effectiveItems =
+            lineItems.length > 0
+              ? lineItems
+              : productOrderId
+                ? [{ productId: productOrderId, quantity: 1 }]
+                : [];
+          if (effectiveItems.length === 0) {
+            throw new BadRequestError(
+              'Product checkout requires items (cart lines with productId and quantity) or productOrderId'
+            );
+          }
+          const latRaw = (customerInfo as Record<string, unknown> | undefined)?.locationLat;
+          const lngRaw = (customerInfo as Record<string, unknown> | undefined)?.locationLng;
+          const srcRaw = (customerInfo as Record<string, unknown> | undefined)?.locationSource;
+          const lat =
+            typeof latRaw === 'string' && latRaw.trim() !== ''
+              ? Number(latRaw)
+              : typeof latRaw === 'number'
+                ? latRaw
+                : undefined;
+          const lng =
+            typeof lngRaw === 'string' && lngRaw.trim() !== ''
+              ? Number(lngRaw)
+              : typeof lngRaw === 'number'
+                ? lngRaw
+                : undefined;
+          const source = typeof srcRaw === 'string' ? srcRaw : undefined;
+          const { order, totalAmount } =
+            await this.paymentService.createPendingProductOrderForGateway(
+              userId,
+              effectiveItems,
+              normalizedPreciseLocation || undefined,
+              {
+                ...(typeof lat === 'number' && !Number.isNaN(lat) ? { latitude: lat } : {}),
+                ...(typeof lng === 'number' && !Number.isNaN(lng) ? { longitude: lng } : {}),
+                ...(source ? { source } : {}),
+              }
+            );
+          if (Math.abs(amount - totalAmount) > 0.02) {
+            throw new BadRequestError(
+              `Amount mismatch: server total is NPR ${totalAmount}, request had NPR ${amount}`
+            );
+          }
+          gatewayOrderId = order._id.toString();
         }
-        const { order, totalAmount } =
-          await this.paymentService.createPendingProductOrderForGateway(
-            userId,
-            effectiveItems,
-            normalizedPreciseLocation
-          );
-        if (Math.abs(amount - totalAmount) > 0.02) {
-          throw new BadRequestError(
-            `Amount mismatch: server total is NPR ${totalAmount}, request had NPR ${amount}`
-          );
-        }
-        gatewayOrderId = order._id.toString();
       } else if (
-        (paymentType === PaymentType.HEALING ||
-          paymentType === PaymentType.PUJA ||
-          paymentType === 'healing' ||
-          paymentType === 'puja') &&
-        orderId
+        (effectivePaymentType === PaymentType.HEALING ||
+          effectivePaymentType === PaymentType.PUJA ||
+          effectivePaymentType === 'healing' ||
+          effectivePaymentType === 'puja') &&
+        (() => {
+          const a =
+            typeof orderId === 'string' && orderId.trim() !== '' ? orderId.trim() : '';
+          const b =
+            typeof productOrderId === 'string' && productOrderId.trim() !== ''
+              ? productOrderId.trim()
+              : '';
+          const ref = a || b;
+          return ref && /^[0-9a-fA-F]{24}$/.test(ref) ? ref : '';
+        })()
       ) {
-        const existingOrder = await this.paymentRepository.findOrderById(orderId);
+        const healingPujaRef =
+          (typeof orderId === 'string' && orderId.trim() !== '' ? orderId.trim() : '') ||
+          (typeof productOrderId === 'string' && productOrderId.trim() !== ''
+            ? productOrderId.trim()
+            : '');
+        const existingOrder = await this.paymentRepository.findOrderById(healingPujaRef);
         if (existingOrder) {
           gatewayOrderId = existingOrder._id.toString();
         } else {
-          const normalizedType =
-            paymentType === PaymentType.HEALING || paymentType === 'healing'
-              ? 'healing'
-              : 'puja';
+          const normalizedType: 'healing' | 'puja' = hasHealingSessionBookingRowKhalti
+            ? 'healing'
+            : paymentType === PaymentType.PUJA || paymentType === 'puja'
+              ? 'puja'
+              : 'healing';
           const { order, totalAmount } =
             await this.paymentService.createPendingServiceOrderForGateway(userId, {
               paymentType: normalizedType,
-              referenceId: orderId,
+              referenceId: healingPujaRef,
               preciseLocation: normalizedPreciseLocation || undefined,
             });
           if (Math.abs(amount - totalAmount) > 0.02) {
@@ -1462,10 +1821,8 @@ export class PaymentController {
         currency: 'NPR',
         status: PaymentStatus.PENDING,
         paymentMethod: PaymentMethod.KHALTI,
-        paymentType: paymentType as PaymentType,
-        metadata: {
-          description,
-        },
+        paymentType: effectivePaymentType as PaymentType,
+        metadata: this.buildGatewayPaymentMetadata(description, customerInfo),
       };
 
       if (gatewayOrderId) {
@@ -1489,6 +1846,14 @@ export class PaymentController {
           payment: payment._id,
         });
       }
+
+      await this.linkHealingSessionBookingIfPresent(
+        userId,
+        customerInfo as Record<string, unknown> | undefined,
+        effectivePaymentType,
+        gatewayOrderId,
+        payment._id.toString()
+      );
 
       // Unique purchase order ID
       const purchaseOrderId = `ORDER_${payment._id}_${Date.now()}`;
@@ -1537,6 +1902,14 @@ export class PaymentController {
           expires_in: khaltiResponse.expires_in,
         },
       });
+
+      await this.linkUnifiedTransactionIfPresent(
+        userId,
+        customerInfo as Record<string, unknown> | undefined,
+        payment._id.toString(),
+        'khalti',
+        khaltiResponse.pidx
+      );
 
       sendSuccess(res, {
         pidx: khaltiResponse.pidx,
@@ -1635,27 +2008,39 @@ export class PaymentController {
           metadata: updatedPayment.metadata,
         });
 
-        await this.paymentRepository.updateOrder(
-          updatedPayment.orderId.toString(),
-          {
-            status: OrderStatus.CONFIRMED,
+        if (updatedPayment.paymentType === PaymentType.PRODUCT) {
+          try {
+            await this.paymentService.completeProductOrderAfterKhaltiSuccess(updatedPayment, {
+              status: verifyResponse.status,
+              total_amount: verifyResponse.total_amount,
+              transaction_id: verifyResponse.transaction_id,
+            });
+          } catch (e) {
+            console.error('❌ Product order settlement failed after Khalti callback', e);
           }
-        );
-        
-        if (updatedPayment.paymentType === PaymentType.JYOTISH_SERVICE) {
-          console.log('🔓 Granting service access for payment...');
-          await this.paymentService.grantServiceAccessForPayment(updatedPayment);
-          console.log('✅ Service access granted successfully');
         } else {
-          console.log('⚠️ Payment type is not JYOTISH_SERVICE, skipping service access grant');
-        }
+          await this.paymentRepository.updateOrder(
+            updatedPayment.orderId.toString(),
+            {
+              status: OrderStatus.CONFIRMED,
+            }
+          );
 
-        if (
-          previousStatus !== PaymentStatus.SUCCESS &&
-          (updatedPayment.paymentType === PaymentType.PUJA ||
-            updatedPayment.paymentType === PaymentType.HEALING)
-        ) {
-          await this.paymentService.notifyServiceListingBooked(updatedPayment);
+          if (updatedPayment.paymentType === PaymentType.JYOTISH_SERVICE) {
+            console.log('🔓 Granting service access for payment...');
+            await this.paymentService.grantServiceAccessForPayment(updatedPayment);
+            console.log('✅ Service access granted successfully');
+          } else {
+            console.log('⚠️ Payment type is not JYOTISH_SERVICE, skipping service access grant');
+          }
+
+          if (
+            previousStatus !== PaymentStatus.SUCCESS &&
+            (updatedPayment.paymentType === PaymentType.PUJA ||
+              updatedPayment.paymentType === PaymentType.HEALING)
+          ) {
+            await this.paymentService.notifyServiceListingBooked(updatedPayment);
+          }
         }
       } else {
         console.log('⚠️ Payment not successful or missing orderId:', {
@@ -1755,33 +2140,52 @@ export class PaymentController {
           paymentType: updatedPayment.paymentType,
         });
 
-        await this.paymentRepository.updateOrder(
-          updatedPayment.orderId.toString(),
-          {
-            status: OrderStatus.CONFIRMED,
+        if (updatedPayment.paymentType === PaymentType.PRODUCT) {
+          try {
+            await this.paymentService.completeProductOrderAfterKhaltiSuccess(updatedPayment, {
+              status: verifyResponse.status,
+              total_amount: verifyResponse.total_amount,
+              transaction_id: verifyResponse.transaction_id,
+            });
+          } catch (e) {
+            console.error('❌ Product order settlement failed after Khalti verify', e);
+            throw e;
           }
-        );
+        } else {
+          await this.paymentRepository.updateOrder(
+            updatedPayment.orderId.toString(),
+            {
+              status: OrderStatus.CONFIRMED,
+            }
+          );
 
-        if (updatedPayment.paymentType === PaymentType.JYOTISH_SERVICE) {
-          console.log('🔓 Granting service access for payment...');
-          await this.paymentService.grantServiceAccessForPayment(updatedPayment);
-          console.log('✅ Service access granted successfully');
-        }
+          if (updatedPayment.paymentType === PaymentType.JYOTISH_SERVICE) {
+            console.log('🔓 Granting service access for payment...');
+            await this.paymentService.grantServiceAccessForPayment(updatedPayment);
+            console.log('✅ Service access granted successfully');
+          }
 
-        if (
-          previousStatus !== PaymentStatus.SUCCESS &&
-          (updatedPayment.paymentType === PaymentType.PUJA ||
-            updatedPayment.paymentType === PaymentType.HEALING)
-        ) {
-          await this.paymentService.notifyServiceListingBooked(updatedPayment);
+          if (
+            previousStatus !== PaymentStatus.SUCCESS &&
+            (updatedPayment.paymentType === PaymentType.PUJA ||
+              updatedPayment.paymentType === PaymentType.HEALING)
+          ) {
+            await this.paymentService.notifyServiceListingBooked(updatedPayment);
+          }
         }
       }
+
+      const settledOrder =
+        updatedPayment?.orderId && paymentStatus === PaymentStatus.SUCCESS
+          ? await this.paymentRepository.findOrderById(updatedPayment.orderId.toString())
+          : null;
 
       sendSuccess(res, {
         paymentId: payment._id,
         status: paymentStatus,
         pidx: verifyResponse.pidx,
         orderId: updatedPayment?.orderId,
+        orderStatus: settledOrder?.status,
         transaction_id: verifyResponse.transaction_id,
         amount: verifyResponse.total_amount,
       }, 'Payment verified successfully');

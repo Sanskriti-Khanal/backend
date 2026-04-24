@@ -20,6 +20,9 @@ import {
   khaltiVerifySchema,
   revokeServiceAccessSchema,
   updateOrderLocationSchema,
+  verifyUnifiedTransactionQuerySchema,
+  createProductCheckoutDraftSchema,
+  orderIdSchema,
 } from '@validators/payment.validator';
 
 const router = Router();
@@ -103,6 +106,12 @@ router.get(
 // Protected routes - require authentication
 router.use(authenticate);
 
+router.get(
+  '/transactions/verify',
+  validate(verifyUnifiedTransactionQuerySchema),
+  paymentController.verifyUnifiedTransaction
+);
+
 // Nabil Bank create order (protected)
 router.post(
   '/nabil/create-order',
@@ -174,6 +183,12 @@ router.get('/payments/:id', validate(paymentIdSchema), paymentController.getPaym
 // Get orders
 router.get('/orders', paymentController.getUserOrders);
 router.get('/orders/service-provider', paymentController.getServiceProviderOrders);
+router.post(
+  '/orders/checkout-draft',
+  validate(createProductCheckoutDraftSchema),
+  paymentController.createProductCheckoutDraft
+);
+router.get('/orders/:id', validate(orderIdSchema), paymentController.getUserOrderById);
 router.patch(
   '/orders/:id/location',
   validate(updateOrderLocationSchema),

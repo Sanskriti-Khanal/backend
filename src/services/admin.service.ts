@@ -29,6 +29,7 @@ import { NotificationType } from '@models/Notification.model';
 import { NotFoundError, BadRequestError } from '@errors/AppError';
 import { UserRole } from '@types';
 import { NotificationService } from './notification.service';
+import { PaymentService } from './payment.service';
 import logger from '@utils/logger';
 
 const ADMIN_SERVICE_ORDER_TYPES: OrderType[] = [
@@ -49,6 +50,7 @@ export class AdminService {
   private enquiryRepository: ProductEnquiryRepository;
   private savedAstrologyRepository: SavedAstrologyRepository;
   private notificationService: NotificationService;
+  private paymentService: PaymentService;
 
   constructor() {
     this.userRepository = new UserRepository();
@@ -60,6 +62,7 @@ export class AdminService {
     this.enquiryRepository = new ProductEnquiryRepository();
     this.savedAstrologyRepository = new SavedAstrologyRepository();
     this.notificationService = new NotificationService();
+    this.paymentService = new PaymentService();
   }
 
   private static asRecord(v: unknown): Record<string, unknown> {
@@ -151,6 +154,13 @@ export class AdminService {
     const enriched: Record<string, unknown> = { ...base };
     enriched.customerName = AdminService.pickCustomerName(base) || '—';
     enriched.customerPhone = AdminService.pickCustomerPhone(base) || '—';
+
+    const payField = base.payment as Record<string, unknown> | undefined;
+    if (payField && typeof payField === 'object') {
+      enriched.linkedPaymentStatus = payField.status;
+      enriched.linkedPaymentId =
+        payField._id != null ? String(payField._id) : undefined;
+    }
 
     const orderType = String(base.orderType);
     if (orderType === OrderType.HEALING_PACKAGE) {
@@ -585,6 +595,11 @@ export class AdminService {
     return this.enrichOrderForAdmin(order);
   }
 
+  async retryProductOrderFulfillment(orderId: string): Promise<Record<string, unknown>> {
+    const order = await this.paymentService.retryProductOrderFulfillment(orderId);
+    return this.enrichOrderForAdmin(order);
+  }
+
   async updateOrderStatus(id: string, status: OrderStatus): Promise<Record<string, unknown>> {
     const existing = await this.paymentRepository.findOrderById(id);
     if (!existing) throw new NotFoundError('Order not found');
@@ -855,6 +870,7 @@ export class AdminService {
       role: UserRole.USER,
       $or: [
         { kundaliCompleted: true },
+        { profileCompleted: true },
         {
           dob: { $exists: true, $ne: null },
           birthTime: { $exists: true, $nin: [null, ''] },
@@ -863,7 +879,7 @@ export class AdminService {
       ],
     })
       .select(
-        'fullName phone username dob birthTime birthPlace kundaliCompleted createdAt updatedAt'
+        'fullName phone username dob birthTime birthPlace kundaliCompleted profileCompleted astroDetails createdAt updatedAt'
       )
       .sort({ updatedAt: -1 })
       .limit(lim)

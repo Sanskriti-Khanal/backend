@@ -7,6 +7,8 @@ import { INotification } from '@models/Notification.model';
 export class PushNotificationService {
   private fcmInitialized: boolean = false;
   private oneSignalClient: Client | null = null;
+  private static oneSignalMissingLogged = false;
+  private static oneSignalInitLogged = false;
 
   constructor() {
     this.initializeFCM();
@@ -16,15 +18,18 @@ export class PushNotificationService {
   private initializeFCM(): void {
     if (env.FCM_PROJECT_ID && env.FCM_PRIVATE_KEY && env.FCM_CLIENT_EMAIL) {
       try {
-        admin.initializeApp({
-          credential: admin.credential.cert({
-            projectId: env.FCM_PROJECT_ID,
-            privateKey: env.FCM_PRIVATE_KEY.replace(/\\n/g, '\n'),
-            clientEmail: env.FCM_CLIENT_EMAIL,
-          }),
-        });
+        // Many services instantiate PushNotificationService; initialize Admin SDK only once.
+        if (admin.apps.length === 0) {
+          admin.initializeApp({
+            credential: admin.credential.cert({
+              projectId: env.FCM_PROJECT_ID,
+              privateKey: env.FCM_PRIVATE_KEY.replace(/\\n/g, '\n'),
+              clientEmail: env.FCM_CLIENT_EMAIL,
+            }),
+          });
+          console.log('✅ FCM initialized successfully');
+        }
         this.fcmInitialized = true;
-        console.log('✅ FCM initialized successfully');
       } catch (error) {
         console.error('❌ FCM initialization failed:', error);
       }
@@ -37,12 +42,18 @@ export class PushNotificationService {
     if (env.ONESIGNAL_APP_ID && env.ONESIGNAL_REST_API_KEY) {
       try {
         this.oneSignalClient = new Client(env.ONESIGNAL_REST_API_KEY, env.ONESIGNAL_APP_ID);
-        console.log('✅ OneSignal initialized successfully');
+        if (!PushNotificationService.oneSignalInitLogged) {
+          console.log('✅ OneSignal initialized successfully');
+          PushNotificationService.oneSignalInitLogged = true;
+        }
       } catch (error) {
         console.error('❌ OneSignal initialization failed:', error);
       }
     } else {
-      console.warn('⚠️ OneSignal credentials not provided');
+      if (!PushNotificationService.oneSignalMissingLogged) {
+        console.warn('⚠️ OneSignal credentials not provided');
+        PushNotificationService.oneSignalMissingLogged = true;
+      }
     }
   }
 

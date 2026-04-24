@@ -1,6 +1,8 @@
 import { ProductRepository } from '@repositories/product.repository';
+import { PaymentRepository } from '@repositories/payment.repository';
 import { RudrakshaCategoryRepository } from '@repositories/rudraksha-category.repository';
 import { GemCategoryRepository } from '@repositories/gem-category.repository';
+import { OrderType } from '@models/Order.model';
 import { IProduct } from '@models/Product.model';
 import { IProductReview } from '@models/ProductReview.model';
 import { NotFoundError, ConflictError, BadRequestError } from '@errors/AppError';
@@ -8,11 +10,13 @@ import { UserRole } from '@types';
 
 export class ProductService {
   private productRepository: ProductRepository;
+  private paymentRepository: PaymentRepository;
   private rudrakshaCategoryRepository: RudrakshaCategoryRepository;
   private gemCategoryRepository: GemCategoryRepository;
 
   constructor() {
     this.productRepository = new ProductRepository();
+    this.paymentRepository = new PaymentRepository();
     this.rudrakshaCategoryRepository = new RudrakshaCategoryRepository();
     this.gemCategoryRepository = new GemCategoryRepository();
   }
@@ -179,6 +183,18 @@ export class ProductService {
     );
     if (existingReview) {
       throw new ConflictError('You have already reviewed this product');
+    }
+
+    const hasPurchased = await this.paymentRepository.userHasCompletedServiceListingPurchase(
+      userId,
+      productId,
+      OrderType.PRODUCT,
+      'product'
+    );
+    if (!hasPurchased) {
+      throw new BadRequestError(
+        'You can only review this product after completing a purchase'
+      );
     }
 
     return this.productRepository.createReview({

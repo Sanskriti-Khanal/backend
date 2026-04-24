@@ -1,6 +1,14 @@
 import mongoose, { Schema, Document } from 'mongoose';
 import { UserRole } from '@types';
 
+/** Birth data used for personalized Rashifal / notifications (separate from generic account fields). */
+export interface IAstroDetails {
+  dateOfBirth?: Date;
+  timeOfBirth?: string;
+  placeOfBirth?: string;
+  gender?: 'male' | 'female' | 'other' | 'prefer_not_to_say';
+}
+
 export interface IUser extends Document {
   phone: string;
   username: string;
@@ -16,6 +24,11 @@ export interface IUser extends Document {
   birthTime?: string;
   birthPlace?: string;
   kundaliCompleted?: boolean;
+
+  /** Nested birth chart inputs for Rashifal personalization. */
+  astroDetails?: IAstroDetails;
+  /** True when astroDetails has required fields for personalized daily Rashifal. */
+  profileCompleted?: boolean;
   
   // Jyotish/Vaastu expert availability: active | not_active | busy
   availabilityStatus?: 'active' | 'not_active' | 'busy';
@@ -33,12 +46,27 @@ export interface IUser extends Document {
   
   // Common fields
   isActive: boolean;
+  /** Incremented on password change to invalidate access JWTs (`tv` claim) and refresh rows. */
+  tokenVersion?: number;
   createdAt: Date;
   updatedAt: Date;
 
   /** Last Vedika AI query (UTC); one question per Asia/Kathmandu calendar day */
   vedikaLastQueryAt?: Date;
 }
+
+const astroDetailsSchema = new Schema(
+  {
+    dateOfBirth: { type: Date },
+    timeOfBirth: { type: String, trim: true },
+    placeOfBirth: { type: String, trim: true },
+    gender: {
+      type: String,
+      enum: ['male', 'female', 'other', 'prefer_not_to_say'],
+    },
+  },
+  { _id: false }
+);
 
 const userSchema = new Schema<IUser>(
   {
@@ -91,6 +119,15 @@ const userSchema = new Schema<IUser>(
       type: Boolean,
       default: false,
     },
+    astroDetails: {
+      type: astroDetailsSchema,
+      default: undefined,
+    },
+    profileCompleted: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
     // Jyotish/Vaastu expert availability
     availabilityStatus: {
       type: String,
@@ -129,6 +166,11 @@ const userSchema = new Schema<IUser>(
       type: Boolean,
       default: true,
     },
+    tokenVersion: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
     vedikaLastQueryAt: Date,
   },
   {
@@ -136,8 +178,6 @@ const userSchema = new Schema<IUser>(
   }
 );
 
-userSchema.index({ phone: 1 });
-userSchema.index({ username: 1 });
 userSchema.index({ role: 1 });
 
 export const UserModel = mongoose.model<IUser>('User', userSchema);

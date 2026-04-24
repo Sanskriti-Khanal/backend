@@ -20,11 +20,17 @@ export const registerUserSchema = z.object({
   }),
 });
 
+const setPasswordByPhone = z.object({
+  phone: phoneSchema,
+  password: z.string().min(6, 'Password must be at least 6 characters'),
+});
+const setPasswordByToken = z.object({
+  password: z.string().min(6, 'Password must be at least 6 characters'),
+  passwordSetToken: z.string().min(32, 'Invalid password-set token'),
+});
+/** Token branch first so { phone, password, passwordSetToken } resolves to token flow. */
 export const setPasswordSchema = z.object({
-  body: z.object({
-    phone: phoneSchema,
-    password: z.string().min(6, 'Password must be at least 6 characters'),
-  }),
+  body: z.union([setPasswordByToken, setPasswordByPhone]),
 });
 
 export const sendOTPSchema = z.object({
@@ -48,10 +54,11 @@ export const loginSchema = z.object({
   }),
 });
 
-export const refreshTokenSchema = z.object({
-  body: z.object({
-    refreshToken: z.string().min(1, 'Refresh token is required'),
-  }),
+/** Refresh token is read from HttpOnly cookie (preferred) or optional body for legacy clients. */
+export const refreshSessionSchema = z.object({
+  body: z.any(),
+  query: z.any(),
+  params: z.any(),
 });
 
 export const updateProfileSchema = z.object({
@@ -96,6 +103,15 @@ export const resetPasswordSchema = z.object({
     phone: phoneSchema,
     otp: z.string().regex(/^[0-9]{4}$/, 'OTP must be 4 digits').or(z.string().min(1).max(10)),
     newPassword: z.string().min(6, 'Password must be at least 6 characters'),
+  }),
+});
+
+export const saveAstroDetailsSchema = z.object({
+  body: z.object({
+    dateOfBirth: z.string().min(4, 'Date of birth is required'),
+    timeOfBirth: z.string().min(1, 'Time of birth is required'),
+    placeOfBirth: z.string().min(2, 'Place of birth is required'),
+    gender: z.enum(['male', 'female', 'other', 'prefer_not_to_say']).optional(),
   }),
 });
 
